@@ -151,31 +151,36 @@ namespace otl {
             mIsRunning = true;
             mStopped = false;
             while (mIsRunning) {
-                std::lock_guard<std::mutex> lock(mMLock);
+
                 uint64_t now = getTimeMsec();
-                while (!mQTimers.empty()) {
-                    TimerPtr timer = mQTimers.top();
-                    if (timer->timeout > now) {
-                        break;
-                    }
-                    mQTimers.pop();
-                    auto it = mMapTimers.find(timer->start_id);
-                    if (it != mMapTimers.end()) {
-                        if (timer->repeat != 0) {
-                            timer->timeout = now + timer->delay_msec;
-                            if (timer->repeat > 0) timer->repeat --;
-                            mQTimers.push(timer);
-                        } else {
-                            mMapTimers.erase(it);
-                        }
-                        mMLock.unlock();
-                        timer->lamdaCb();
-                        mMLock.lock();
-                    }
+                mMLock.lock();
+                if (mQTimers.empty()) {
+                    mMLock.unlock();
+                    msleep(1);
+                    continue;
                 }
 
+                TimerPtr timer = mQTimers.top();
+                if (timer->timeout > now) {
+                    mMLock.unlock();
+                    continue;
+                }
+
+                mQTimers.pop();
+                if (timer->repeat) {
+                    // readd it
+                    timer->timeout = now + timer->delay_msec;
+                    mQTimers.push(timer);
+                }else {
+                    auto it = mMapTimers.find(timer->start_id);
+                    if (it != mMapTimers.end()) {
+                        mMapTimers.erase(it);
+                    }
+                }
                 mMLock.unlock();
+                timer->lamdaCb();
             }
+
             std::cout << "rtc_timer_queue exit!" << std::endl;
             mStopped = true;
             return 1;

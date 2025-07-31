@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.15)
+
+project(otl)
 
 set(CMAKE_CXX_STANDARD 14)
 set(UTILITY_TOP ${CMAKE_CURRENT_SOURCE_DIR})

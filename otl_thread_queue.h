@@ -24,13 +24,14 @@
 #endif
 
 #include <pthread.h>
+#include "otl_baseclass.h"
 
 namespace otl {
 
 static int cpu_index = 0;
 
 template<typename T>
-class BlockingQueue {
+class BlockingQueue: public NoCopyable {
 private:
     size_t size_impl() const {
         return m_type == 0 ? m_queue.size() : m_vec.size();
@@ -277,7 +278,7 @@ private:
 };
 
 template<typename T>
-class WorkerPool {
+class WorkerPool : public NoCopyable {
     BlockingQueue<T> *m_work_que;
     int m_thread_num;
     using OnWorkItemsCallback = std::function<void(std::vector<T> &item)>;
@@ -289,7 +290,13 @@ public:
     WorkerPool() : m_work_que(nullptr), m_thread_num(0), m_work_item_func(nullptr), m_max_pop_num(1),
                    m_min_pop_num(1) {}
 
-    virtual ~WorkerPool() {}
+    virtual ~WorkerPool() {
+
+        for (auto pth : m_threads) {
+            pth->join();
+            delete pth;
+        }
+    }
 
     int init(BlockingQueue<T> *que, int thread_num, int min_pop_num, int max_pop_num) {
         m_work_que = que;
@@ -322,7 +329,7 @@ public:
     }
 
     void setCPU(std::thread &th) {
-        static int cpu_count = std::thread::hardware_concurrency();
+        static auto cpu_count = std::thread::hardware_concurrency();
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(cpu_index++ % cpu_count, &cpuset);

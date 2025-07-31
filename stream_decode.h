@@ -27,30 +27,30 @@ struct StreamDecoderEvents {
 };
 
 class StreamDecoder : public StreamDemuxerEvents {
-    StreamDecoderEvents *m_observer;
+    StreamDecoderEvents *mObserver;
 
     using OnDecodedFrameCallback = std::function<void(const AVPacket *pkt, const AVFrame *pFrame)>;
-    using OnDecodedSEICallback = std::function<void(const uint8_t *sei_data, int sei_data_len, uint64_t pts, int64_t pkt_pos)>;
+    using OnDecodedSeiCallback = std::function<void(const uint8_t *seiData, int seiDataLen, uint64_t pts, int64_t pktPos)>;
     using OnStreamEofCallback = std::function<void()>;
-    OnDecodedFrameCallback m_onDecodedFrameFunc;
-    OnDecodedSEICallback m_onDecodedSEIFunc;
+    OnDecodedFrameCallback mOnDecodedFrameFunc;
+    OnDecodedSeiCallback mOnDecodedSeiFunc;
 
-    StreamDemuxer::OnAvformatOpenedFunc m_pfnOnAVFormatOpened;
-    StreamDemuxer::OnAvformatClosedFunc m_pfnOnAVFormatClosed;
-    StreamDemuxer::OnReadFrameFunc m_pfnOnReadFrame;
-    StreamDemuxer::OnReadEofFunc m_pfnOnReadEof;
+    StreamDemuxer::OnAvformatOpenedFunc mOnAvformatOpenedFunc;
+    StreamDemuxer::OnAvformatClosedFunc mOnAvformatClosedFunc;
+    StreamDemuxer::OnReadFrameFunc mOnReadFrameFunc;
+    StreamDemuxer::OnReadEofFunc mOnReadEofFunc;
 
 protected:
-    std::list<AVPacket *> m_listPackets;
-    AVCodecContext *m_decCtx{nullptr};
-    AVCodecContext *m_externalDecCtx{nullptr};
-    int m_videoStreamIndex{0};
-    int m_frameDecodedNum{0};
-    StreamDemuxer m_demuxer;
-    AVDictionary *m_optsDecoder{nullptr};
-    bool m_isWaitingIframe{true};
-    int m_id{0};
-    AVRational m_timebase;
+    std::list<AVPacket *> mListPackets;
+    AVCodecContext *mDecCtx{nullptr};
+    AVCodecContext *mExternalDecCtx{nullptr};
+    int mVideoStreamIndex{0};
+    int mFrameDecodedNum{0};
+    StreamDemuxer mDemuxer;
+    AVDictionary *mOptsDecoder{nullptr};
+    bool mIsWaitingIframe{true};
+    int mId{0};
+    AVRational mTimebase;
 
     int createVideoDecoder(AVFormatContext *ifmtCtx);
     int putPacket(AVPacket *pkt);
@@ -73,27 +73,27 @@ public:
     int setObserver(StreamDecoderEvents *observer);
 
     void setDecodedFrameCallback(OnDecodedFrameCallback func) {
-        m_onDecodedFrameFunc = func;
+        mOnDecodedFrameFunc = func;
     }
 
-    void setDecodedSeiInfoCallback(OnDecodedSEICallback func) {
-        m_onDecodedSEIFunc = func;
+    void setDecodedSeiInfoCallback(OnDecodedSeiCallback func) {
+        mOnDecodedSeiFunc = func;
     }
 
     void setAvformatOpenedCallback(StreamDemuxer::OnAvformatOpenedFunc func) {
-        m_pfnOnAVFormatOpened = func;
+        mOnAvformatOpenedFunc = func;
     }
 
     void setAvformatClosedCallback(StreamDemuxer::OnAvformatClosedFunc func) {
-        m_pfnOnAVFormatClosed = func;
+        mOnAvformatClosedFunc = func;
     }
 
     void setReadFrameCallback(StreamDemuxer::OnReadFrameFunc func) {
-        m_pfnOnReadFrame = func;
+        mOnReadFrameFunc = func;
     }
 
     void setReadEofCallback(StreamDemuxer::OnReadEofFunc func) {
-        m_pfnOnReadEof = func;
+        mOnReadEofFunc = func;
     }
 
     int openStream(std::string url, bool repeat = true, AVDictionary *opts = nullptr);

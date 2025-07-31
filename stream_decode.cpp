@@ -4,24 +4,24 @@
 namespace otl {
 
 StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder)
-    : m_observer(nullptr), m_externalDecCtx(decoder) {
+    : mObserver(nullptr), mExternalDecCtx(decoder) {
     std::cout << "StreamDecoder() ctor..." << std::endl;
-    m_isWaitingIframe = true;
-    m_id = id;
-    m_optsDecoder = nullptr;
+    mIsWaitingIframe = true;
+    mId = id;
+    mOptsDecoder = nullptr;
 }
 
 StreamDecoder::~StreamDecoder() {
     std::cout << "~StreamDecoder() dtor..." << std::endl;
-    av_dict_free(&m_optsDecoder);
+    av_dict_free(&mOptsDecoder);
 }
 
 int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame) {
     AVCodecContext *decCtx = nullptr;
-    if (nullptr == m_externalDecCtx) {
-        decCtx = m_decCtx;
+    if (nullptr == mExternalDecCtx) {
+        decCtx = mDecCtx;
     } else {
-        decCtx = m_externalDecCtx;
+        decCtx = mExternalDecCtx;
     }
 
 #if LIBAVCODEC_VERSION_MAJOR > 56
@@ -66,53 +66,51 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame) {
 }
 
 void StreamDecoder::onAvformatOpened(AVFormatContext *ifmtCtx) {
-    if (m_pfnOnAVFormatOpened != nullptr) {
-        m_pfnOnAVFormatOpened(ifmtCtx);
+    if (mOnAvformatOpenedFunc != nullptr) {
+        mOnAvformatOpenedFunc(ifmtCtx);
     }
 
-    if (m_externalDecCtx == nullptr) {
+    if (mExternalDecCtx == nullptr) {
         if (0 == createVideoDecoder(ifmtCtx)) {
             printf("create video decoder ok!\n");
         }
     }
 
     if (strcmp(ifmtCtx->iformat->name, "h264") != 0) {
-        m_isWaitingIframe = false;
+        mIsWaitingIframe = false;
     }
 }
 
 void StreamDecoder::onAvformatClosed() {
     clearPackets();
-    if (m_decCtx != nullptr) {
-        avcodec_close(m_decCtx);
-        avcodec_free_context(&m_decCtx);
+    if (mDecCtx != nullptr) {
+        avcodec_close(mDecCtx);
+        avcodec_free_context(&mDecCtx);
         printf("free video decoder context!\n");
     }
 
-    if (m_pfnOnAVFormatClosed) {
-        m_pfnOnAVFormatClosed();
-    }
+    if (mOnAvformatClosedFunc) mOnAvformatClosedFunc();
 }
 
 int StreamDecoder::onReadFrame(AVPacket *pkt) {
     int ret = 0;
 
-    if (m_videoStreamIndex != pkt->stream_index) {
+    if (mVideoStreamIndex != pkt->stream_index) {
         // ignore other streams if not video.
         return 0;
     }
 
-    if (m_isWaitingIframe) {
+    if (mIsWaitingIframe) {
         if (isKeyFrame(pkt)) {
-            m_isWaitingIframe = false;
+            mIsWaitingIframe = false;
         }
     }
 
-    if (m_isWaitingIframe) {
+    if (mIsWaitingIframe) {
         return 0;
     }
 
-    auto decCtx = m_externalDecCtx != nullptr ? m_externalDecCtx : m_decCtx;
+    auto decCtx = mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx;
 
     if (decCtx->codec_id == AV_CODEC_ID_H264) {
         std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
@@ -122,27 +120,25 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
             0 == pkt->data[0] &&
             0 == pkt->data[1] &&
             0 == pkt->data[2] &&
-            1 == pkt->data[3] &&
-            (pkt->data[4] & 0x1f) == 6) {
+            1 == pkt->data[3]) {
+            //seiLen = h264_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
+            seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
+        }
 
-            if (m_onDecodedSEIFunc != nullptr || m_observer != nullptr) {
-                seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
-                if (seiLen > 0) {
-                    if (m_observer != nullptr) {
-                        m_observer->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
-                    }
-
-                    if (m_onDecodedSEIFunc != nullptr) {
-                        m_onDecodedSEIFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
-                    }
-                }
-            }
+        if (seiLen > 0 && mOnDecodedSeiFunc) {
+            mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
         }
     } else if (decCtx->codec_id == AV_CODEC_ID_H265) {
         std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
         int seiLen = 0;
 
-        if (pkt->data) {
+        if (pkt->data &&
+            0 == pkt->data[0] &&
+            0 == pkt->data[1] &&
+            0 == pkt->data[2] &&
+            1 == pkt->data[3]) {
+            //seiLen = h265_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
+            seiLen = h265SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
             int nalType = 0;
             if (0 == pkt->data[0] &&
                 0 == pkt->data[1] &&
@@ -156,15 +152,26 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
             }
 
             if (nalType == 39) {
-                if (m_observer != nullptr || m_onDecodedSEIFunc != nullptr) {
-                    seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
+                if (mObserver != nullptr || mOnDecodedSeiFunc != nullptr) {
+                    std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
+                    int seiLen = 0;
+
+                    if (pkt->data &&
+                        0 == pkt->data[0] &&
+                        0 == pkt->data[1] &&
+                        0 == pkt->data[2] &&
+                        1 == pkt->data[3]) {
+                        //seiLen = h264_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
+                        seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
+                    }
+
                     if (seiLen > 0) {
-                        if (m_observer != nullptr) {
-                            m_observer->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
+                        if (mObserver != nullptr) {
+                            mObserver->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
                         }
 
-                        if (m_onDecodedSEIFunc != nullptr) {
-                            m_onDecodedSEIFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
+                        if (mOnDecodedSeiFunc != nullptr) {
+                            mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
                         }
                     }
                 }
@@ -181,23 +188,23 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
         return ret;
     }
 
-    if (m_frameDecodedNum == 0) {
-        printf("id=%d, ffmpeg delayed frames: %d\n", m_id, (int)m_listPackets.size());
+    if (mFrameDecodedNum == 0) {
+        printf("id=%d, ffmpeg delayed frames: %d\n", mId, (int)mListPackets.size());
     }
 
-    if (ret > 0) m_frameDecodedNum++;
+    if (ret > 0) mFrameDecodedNum++;
 
     putPacket(pkt);
 
     if (ret > 0) {
         auto pktS = getPacket();
 
-        if (m_observer) {
-            m_observer->onDecodedAVFrame(pktS, frame);
+        if (mObserver) {
+            mObserver->onDecodedAVFrame(pktS, frame);
         }
 
-        if (m_onDecodedFrameFunc != nullptr) {
-            m_onDecodedFrameFunc(pktS, frame);
+        if (mOnDecodedFrameFunc != nullptr) {
+            mOnDecodedFrameFunc(pktS, frame);
         }
 
         av_packet_unref(pktS);
@@ -211,23 +218,15 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
 }
 
 void StreamDecoder::onReadEof(AVPacket *pkt) {
-#if 1
-    while (1) {
-        int ret = onReadFrame(pkt);
-        if (ret <= 0) {
-            break;
-        }
-    }
-#endif
-    m_frameDecodedNum = 0;
+    mFrameDecodedNum = 0;
     clearPackets();
 
-    if (m_observer) {
-        m_observer->onStreamEof();
+    if (mObserver) {
+        mObserver->onStreamEof();
     }
 
-    if (m_pfnOnReadEof != nullptr) {
-        m_pfnOnReadEof(nullptr);
+    if (mOnReadEofFunc != nullptr) {
+        mOnReadEofFunc(nullptr);
     }
 }
 
@@ -240,25 +239,28 @@ int StreamDecoder::putPacket(AVPacket *pkt) {
 #endif
 
     av_packet_ref(pktNew, pkt);
-    m_listPackets.push_back(pktNew);
+    mListPackets.push_back(pktNew);
     return 0;
 }
 
 AVPacket *StreamDecoder::getPacket() {
-    if (m_listPackets.size() == 0) return nullptr;
-    auto pkt = m_listPackets.front();
-    m_listPackets.pop_front();
+    if (mListPackets.size() == 0) return nullptr;
+    auto pkt = mListPackets.front();
+    mListPackets.pop_front();
     return pkt;
 }
 
 void StreamDecoder::clearPackets() {
-    while (m_listPackets.size() > 0) {
-        auto pkt = m_listPackets.front();
-        m_listPackets.pop_front();
-        av_packet_unref(pkt);
-        av_freep(&pkt);
+    while (mListPackets.size() > 0) {
+        auto pkt = mListPackets.front();
+        mListPackets.pop_front();
+#if LIBAVCODEC_VERSION_MAJOR > 56
+        av_packet_free(&pkt);
+#else
+        av_free_packet(pkt);
+        av_free(pkt);
+#endif
     }
-    return;
 }
 
 int StreamDecoder::getVideoStreamIndex(AVFormatContext *ifmtCtx) {
@@ -269,23 +271,25 @@ int StreamDecoder::getVideoStreamIndex(AVFormatContext *ifmtCtx) {
         auto codecType = ifmtCtx->streams[i]->codec->codec_type;
 #endif
         if (codecType == AVMEDIA_TYPE_VIDEO) {
-            m_videoStreamIndex = i;
+            mVideoStreamIndex = i;
             break;
         }
     }
-    return m_videoStreamIndex;
+    return mVideoStreamIndex;
 }
 
 AVCodecID StreamDecoder::getVideoCodecId() {
-    if (m_decCtx) {
-        return m_decCtx->codec_id;
+    if (mDecCtx) {
+        return mDecCtx->codec_id;
     }
     return AV_CODEC_ID_NONE;
-}
+    }
+
+    int ret = 0;
 
 int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
     int videoIndex = getVideoStreamIndex(ifmtCtx);
-    m_timebase = ifmtCtx->streams[videoIndex]->time_base;
+    mTimebase = ifmtCtx->streams[videoIndex]->time_base;
 
 #if LIBAVCODEC_VERSION_MAJOR > 56
     auto codecId = ifmtCtx->streams[videoIndex]->codecpar->codec_id;
@@ -299,8 +303,14 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
         return -1;
     }
 
-    m_decCtx = avcodec_alloc_context3(codec);
-    if (m_decCtx == NULL) {
+    if (mDecCtx != nullptr) {
+        avcodec_close(mDecCtx);
+        avcodec_free_context(&mDecCtx);
+        mDecCtx = nullptr;
+    }
+
+    mDecCtx = avcodec_alloc_context3(codec);
+    if (mDecCtx == NULL) {
         printf("avcodec_alloc_context3 err");
         return -1;
     }
@@ -308,45 +318,44 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
     int ret = 0;
 
 #if LIBAVCODEC_VERSION_MAJOR > 56
-    if ((ret = avcodec_parameters_to_context(m_decCtx, ifmtCtx->streams[videoIndex]->codecpar)) < 0) {
+    if ((ret = avcodec_parameters_to_context(mDecCtx, ifmtCtx->streams[videoIndex]->codecpar)) < 0) {
         fprintf(stderr, "Failed to copy %s codec parameters to decoder context\n",
                 av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return ret;
     }
 #else
-    if ((ret = avcodec_copy_context(m_decCtx, ifmtCtx->streams[videoIndex]->codec)) < 0) {
+    if ((ret = avcodec_copy_context(mDecCtx, ifmtCtx->streams[videoIndex]->codec)) < 0) {
         fprintf(stderr, "Failed to copy %s codec parameters to decoder context\n",
                 av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
         return ret;
     }
-#endif
 
     if (codec->capabilities & AV_CODEC_CAP_TRUNCATED) {
-        m_decCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
+        mDecCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
     }
+#endif
 
-    AVDictionary *opts = NULL;
-    av_dict_copy(&opts, m_optsDecoder, 0);
-    if (avcodec_open2(m_decCtx, codec, &opts) < 0) {
-        std::cout << "Unable to open codec";
-        return -1;
+    if ((ret = avcodec_open2(mDecCtx, codec, &mOptsDecoder)) < 0) {
+        fprintf(stderr, "Failed to open %s codec\n",
+                av_get_media_type_string(AVMEDIA_TYPE_VIDEO));
+        return ret;
     }
 
     return 0;
 }
 
 int StreamDecoder::setObserver(StreamDecoderEvents *observer) {
-    m_observer = observer;
+    mObserver = observer;
     return 0;
 }
 
 int StreamDecoder::openStream(std::string url, bool repeat, AVDictionary *opts) {
-    av_dict_copy(&m_optsDecoder, opts, 0);
-    return m_demuxer.openStream(url, this, repeat);
+    av_dict_copy(&mOptsDecoder, opts, 0);
+    return mDemuxer.openStream(url, this, repeat);
 }
 
 int StreamDecoder::closeStream(bool isWaiting) {
-    return m_demuxer.closeStream(isWaiting);
+    return mDemuxer.closeStream(isWaiting);
 }
 
 AVPacket* StreamDecoder::ffmpegPacketAlloc() {
@@ -371,10 +380,11 @@ AVCodecContext* StreamDecoder::ffmpegCreateDecoder(enum AVCodecID codecId, AVDic
         printf("avcodec_alloc_context3 err");
         return nullptr;
     }
-
+#if LIBAVCODEC_VERSION_MAJOR < 56
     if (codec->capabilities & AV_CODEC_CAP_TRUNCATED) {
         decCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
     }
+#endif
 
     decCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     decCtx->workaround_bugs = FF_BUG_AUTODETECT;
@@ -392,7 +402,7 @@ AVCodecContext* StreamDecoder::ffmpegCreateDecoder(enum AVCodecID codecId, AVDic
 }
 
 bool StreamDecoder::isKeyFrame(AVPacket *pkt) {
-    auto decCtx = m_externalDecCtx != nullptr ? m_externalDecCtx : m_decCtx;
+    auto decCtx = mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx;
     if (decCtx->codec_id == AV_CODEC_ID_H264) {
         if (pkt == nullptr || pkt->data == nullptr) return false;
         int nalType = pkt->data[4] & 0x1f;

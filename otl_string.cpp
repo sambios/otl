@@ -1,10 +1,8 @@
-
-
 #include "otl_string.h"
 #include <stdarg.h>
 
 namespace otl {
-    std::vector<std::string> split(std::string str, std::string pattern)
+    std::vector<std::string> splitString(std::string str, std::string pattern)
     {
         std::string::size_type pos;
         std::vector<std::string> result;
@@ -24,12 +22,12 @@ namespace otl {
         return result;
     }
 
-    bool start_with(const std::string &str, const std::string &head)
+    bool startWith(const std::string &str, const std::string &head)
     {
         return str.compare(0, head.size(), head) == 0;
     }
 
-    std::string file_name_from_path(const std::string& path, bool hasExt){
+    std::string fileNameFromPath(const std::string& path, bool hasExt){
         int pos = path.find_last_of('/');
         std::string str = path.substr(pos+1, path.size());
         if (!hasExt) {
@@ -41,7 +39,7 @@ namespace otl {
         return str;
     }
 
-    std::string file_ext_from_path(const std::string& str){
+    std::string fileExtensionFromPath(const std::string& str){
         std::string ext;
         auto pos = str.find_last_of('.');
         if (std::string::npos != pos) {
@@ -68,7 +66,7 @@ namespace otl {
         return str;
     }
 
-    std::string base64_enc(const void *ptr, size_t sz)
+    std::string base64Enc(const void *ptr, size_t sz)
     {
         const char EncodeTable[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         std::string encoded_str;
@@ -110,7 +108,7 @@ namespace otl {
         return encoded_str;
     }
 
-    std::string base64_dec(const void *data, size_t size)
+    std::string base64Dec(const void *data, size_t size)
     {
          const char DecodeTable[] =
          {
@@ -162,5 +160,21 @@ namespace otl {
              }
          }
          return decoded_str;
+    }
+
+    std::string replaceHomeDirectory(const std::string& path) {
+        // 检查路径是否以~/开头
+        if (path.size() >= 2 && path[0] == '~' && path[1] == '/') {
+            // 获取HOME环境变量
+            const char* homeDir = std::getenv("HOME");
+
+            if (homeDir != nullptr) {
+                // 替换~为实际的HOME目录
+                return std::string(homeDir) + path.substr(1);
+            }
+        }
+
+        // 如果不需要替换则返回原路径
+        return path;
     }
 } // namespace otl

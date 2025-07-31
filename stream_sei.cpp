@@ -26,34 +26,34 @@ uint32_t reverseBytes(uint32_t value) {
            ((value & 0xFF000000) >> 24);
 }
 
-uint32_t h264sei_calc_nalu_size(uint32_t content)
+uint32_t h264SeiCalcNaluSize(uint32_t content)
 {
     //SEI payload size
-    uint32_t sei_payload_size = content + UUID_SIZE;
+    uint32_t seiPayloadSize = content + UUID_SIZE;
     //NALU + payload���� + ���ݳ��� + ����
-    uint32_t sei_size = 1 + 1 + (sei_payload_size / 0xFF + (sei_payload_size % 0xFF != 0 ? 1 : 0)) + sei_payload_size;
+    uint32_t seiSize = 1 + 1 + (seiPayloadSize / 0xFF + (seiPayloadSize % 0xFF != 0 ? 1 : 0)) + seiPayloadSize;
     //��ֹ��
-    uint32_t tail_size = 2;
-    if (sei_size % 2 == 1)
+    uint32_t tailSize = 2;
+    if (seiSize % 2 == 1)
     {
-        tail_size -= 1;
+        tailSize -= 1;
     }
-    sei_size += tail_size;
+    seiSize += tailSize;
 
-    return sei_size;
+    return seiSize;
 }
 
 uint32_t h264SeiCalcPacketSize(uint32_t size)
 {
     // Packet size = NALUSize + StartCodeSize
-    return h264sei_calc_nalu_size(size) + 4;
+    return h264SeiCalcNaluSize(size) + 4;
 }
 
 int h264SeiPacketWrite(uint8_t *oPacketBuf, bool isAnnexb, const uint8_t *content, uint32_t size)
 {
     unsigned char * data = (unsigned char*)oPacketBuf;
-    //unsigned int nalu_size = (unsigned int)h264sei_calc_nalu_size(size);
-    //uint32_t sei_size = nalu_size;
+    //unsigned int naluSize = (unsigned int)h264SeiCalcNaluSize(size);
+    //uint32_t seiSize = naluSize;
 
 
     memcpy(data, start_code, sizeof(start_code));
@@ -65,13 +65,13 @@ int h264SeiPacketWrite(uint8_t *oPacketBuf, bool isAnnexb, const uint8_t *conten
     *data++ = 6; //SEI
     //sei payload type
     *data++ = 5; //unregister
-    size_t sei_payload_size = size + UUID_SIZE;
+    size_t seiPayloadSize = size + UUID_SIZE;
 
     while (true)
     {
-        *data++ = (sei_payload_size >= 0xFF ? 0xFF : (char)sei_payload_size);
-        if (sei_payload_size < 0xFF) break;
-        sei_payload_size -= 0xFF;
+        *data++ = (seiPayloadSize >= 0xFF ? 0xFF : (char)seiPayloadSize);
+        if (seiPayloadSize < 0xFF) break;
+        seiPayloadSize -= 0xFF;
     }
 
     //UUID
@@ -88,38 +88,38 @@ int h264SeiPacketWrite(uint8_t *oPacketBuf, bool isAnnexb, const uint8_t *conten
     return data - oPacketBuf;
 }
 
-static int get_sei_buffer(unsigned char * data, uint32_t size, uint8_t * buff, int buf_size)
+static int getSeiBuffer(unsigned char * data, uint32_t size, uint8_t * buff, int bufSize)
 {
     unsigned char * sei = data;
-    int sei_type = 0;
-    unsigned sei_size = 0;
+    int seiType = 0;
+    unsigned seiSize = 0;
     //payload type
     do {
-        sei_type += *sei;
+        seiType += *sei;
     } while (*sei++ == 255);
 
     do {
-        sei_size += *sei;
+        seiSize += *sei;
     } while (*sei++ == 255);
 
-    if (sei_size >= UUID_SIZE && sei_size <= (data + size - sei) &&
-        sei_type == 5 && memcmp(sei, uuid, UUID_SIZE) == 0)
+    if (seiSize >= UUID_SIZE && seiSize <= (data + size - sei) &&
+        seiType == 5 && memcmp(sei, uuid, UUID_SIZE) == 0)
     {
         sei += UUID_SIZE;
-        sei_size -= UUID_SIZE;
+        seiSize -= UUID_SIZE;
 
-        if (buff != NULL && buf_size != 0)
+        if (buff != NULL && bufSize != 0)
         {
-            if (buf_size > (int)sei_size)
+            if (bufSize > (int)seiSize)
             {
-                memcpy(buff, sei, sei_size);
+                memcpy(buff, sei, seiSize);
             }else{
-                printf("ERROR:input buffer(%d) < SEI size(%d)\n", buf_size, sei_size);
+                printf("ERROR:input buffer(%d) < SEI size(%d)\n", bufSize, seiSize);
                 return -1;
             }
         }
 
-        return sei_size;
+        return seiSize;
     }
     return -1;
 }
@@ -155,28 +155,18 @@ int h264SeiPacketRead(uint8_t *inPacket, uint32_t size, uint8_t *buffer, int buf
 
                 if (startCodeSize == 3 || startCodeSize == 4)
                 {
-                    if ((inPacket + size - data) > (startCodeSize + 1))
+                    data += startCodeSize;
+                    if (*data == 6) //SEI
                     {
-                        //SEI
-                        unsigned char * sei = data + startCodeSize + 1;
-
-                        int ret = get_sei_buffer(sei, (inPacket + size - sei), buffer, buffSize);
-                        if (ret != -1)
+                        int seiSize = getSeiBuffer(data, inPacket + size - data, buffer, buffSize);
+                        if (seiSize > 0)
                         {
-                            return ret;
+                            return seiSize;
                         }
                     }
-                    data += startCodeSize + 1;
-                }
-                else
-                {
-                    data += startCodeSize + 1;
                 }
             }
-            else
-            {
-                data++;
-            }
+            data++;
         }
     }
     else
@@ -190,8 +180,9 @@ int h264SeiPacketRead(uint8_t *inPacket, uint32_t size, uint8_t *buffer, int buf
 int h265SeiPacketWrite(uint8_t *packet, bool isAnnexb, const uint8_t *content, uint32_t size)
 {
     unsigned char * data = (unsigned char*)packet;
-    //unsigned int nalu_size = (unsigned int)h264sei_calc_nalu_size(size);
-    //uint32_t sei_size = nalu_size;
+    //unsigned int naluSize = (unsigned int)h264SeiCalcNaluSize(size);
+    //uint32_t seiSize = naluSize;
+
 
     memcpy(data, start_code, sizeof(start_code));
 
@@ -204,13 +195,13 @@ int h265SeiPacketWrite(uint8_t *packet, bool isAnnexb, const uint8_t *content, u
     *data++ = 1 + (nalUnitType == 2);
     //sei payload type
     *data++ = 5; //unregister
-    size_t sei_payload_size = size + UUID_SIZE;
+    size_t seiPayloadSize = size + UUID_SIZE;
 
     while (true)
     {
-        *data++ = (sei_payload_size >= 0xFF ? 0xFF : (char)sei_payload_size);
-        if (sei_payload_size < 0xFF) break;
-        sei_payload_size -= 0xFF;
+        *data++ = (seiPayloadSize >= 0xFF ? 0xFF : (char)seiPayloadSize);
+        if (seiPayloadSize < 0xFF) break;
+        seiPayloadSize -= 0xFF;
     }
 
     //UUID
@@ -263,7 +254,7 @@ int h265SeiPacketRead(uint8_t *packet, uint32_t size, uint8_t *buffer, int bufSi
                         //SEI
                         unsigned char * sei = data + startCodeSize + 2;
 
-                        int ret = get_sei_buffer(sei, (packet + size - sei), buffer, bufSize);
+                        int ret = getSeiBuffer(sei, (packet + size - sei), buffer, bufSize);
                         if (ret != -1)
                         {
                             return ret;
@@ -281,11 +272,10 @@ int h265SeiPacketRead(uint8_t *packet, uint32_t size, uint8_t *buffer, int bufSi
                 data++;
             }
         }
+    }else{
+        //TODO: mp4 format
     }
-    else
-    {
-        printf("can't find NALU startCode\n");
-    }
+    printf("can't find NALU startCode\n");
     return -1;
 }
 

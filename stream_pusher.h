@@ -185,7 +185,12 @@ namespace otl {
                     }
                 }
 
-                m_ofmtCtx->oformat->flags |= AVFMT_TS_NONSTRICT;
+                // >> fixed
+                // m_ofmtCtx->oformat->flags |= AVFMT_TS_NONSTRICT;
+                // << fixed
+                // 如果你需要设置格式相关的选项，可以使用 av_opt_set 等函数
+                // 例如设置严格度（如果需要非严格的时间戳）
+                av_opt_set(m_ofmtCtx, "strict", "experimental", 0);
             }
 
             if (!m_ofmtCtx) {

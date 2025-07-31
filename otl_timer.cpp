@@ -18,17 +18,17 @@ namespace otl {
 #define RTC_RETURN_EXP_IF_FAIL(cond, exp) if (!(cond)) { fprintf(stderr, "Assert failed: %s in %s:%d\n", #cond, __FUNCTION__, __LINE__); exp;}
 
 #define rtc_container_of(ptr, type, member)  ((type *) ((char *) (ptr) - offsetof(type, member)))
-    uint64_t gettime_msec() {
+    uint64_t getTimeMsec() {
         auto tnow = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::milliseconds>(tnow.time_since_epoch()).count();
     }
 
-    uint64_t gettime_usec() {
+    uint64_t getTimeUsec() {
         auto tnow = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::microseconds>(tnow.time_since_epoch()).count();
     }
 
-    uint64_t gettime_sec() {
+    uint64_t getTimeSec() {
         auto tnow = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::seconds>(tnow.time_since_epoch()).count();
     }
@@ -87,28 +87,25 @@ namespace otl {
     };
 
     class TimerQueueImpl: public TimerQueue {
-        int generate_timer(uint32_t delay_msec, std::function<void()> func, int repeat, uint64_t *p_timer_id);
-        std::unordered_map<uint64_t, TimerPtr> m_mapTimers;
-        MinHeap<TimerPtr> m_QTimers;
-        uint64_t m_nTimerSN;
-        std::mutex m_mLock;
-        bool m_isRunning;
-        bool m_stopped;
+        int generateTimer(uint32_t delayMsec, std::function<void()> func, int repeat, uint64_t *pTimerId);
+        std::unordered_map<uint64_t, TimerPtr> mMapTimers;
+        MinHeap<TimerPtr> mQTimers;
+        uint64_t mNTimerSN;
+        std::mutex mMLock;
+        bool mIsRunning;
+        bool mStopped;
 
     public:
-        TimerQueueImpl():m_nTimerSN(0), m_isRunning(false), m_stopped(false) {
+        TimerQueueImpl():mNTimerSN(0), mIsRunning(false), mStopped(false) {
             std::cout << "TimerQueueImpl ctor" << std::endl;
-
         }
 
-        ~TimerQueueImpl()
-        {
-            m_isRunning = false;
-            while(!m_stopped) msleep(10);
+        virtual ~TimerQueueImpl() {
             std::cout << "TimerQueueImpl dtor" << std::endl;
+            stop();
         }
 
-        virtual int create_timer(uint32_t delay_msec, uint32_t skew, std::function<void()> func, int repeat, uint64_t *p_timer_id) override
+        virtual int createTimer(uint32_t delayMsec, uint32_t skew, std::function<void()> func, int repeat, uint64_t *pTimerId) override
         {
             RTC_RETURN_EXP_IF_FAIL(func != nullptr , return -1);
             TimerPtr timer = std::make_shared<Timer>();
@@ -118,102 +115,74 @@ namespace otl {
             }
 
             timer->lamdaCb = func;
-            timer->timeout = gettime_msec() + skew;
-            timer->delay_msec = delay_msec;
-            timer->start_id = m_nTimerSN ++;
+            timer->timeout = getTimeMsec() + skew;
+            timer->delay_msec = delayMsec;
+            timer->start_id = mNTimerSN ++;
             timer->repeat = repeat;
-
-            std::unique_lock<std::mutex> locker(m_mLock);
-
-            // Add to Heap
-            m_QTimers.push(timer);
-
-            // Add to HashTable
-            m_mapTimers[timer->start_id] = timer;
-            if (p_timer_id)
             {
-                *p_timer_id = timer->start_id;
+                std::lock_guard<std::mutex> lock(mMLock);
+                mMapTimers[timer->start_id] = timer;
+                mQTimers.push(timer);
             }
-
+            if (pTimerId) *pTimerId = timer->start_id;
             return 0;
         }
 
-        virtual int delete_timer(uint64_t timer_id) override {
-            std::unique_lock<std::mutex> locker(m_mLock);
-            if (m_mapTimers.find(timer_id) == m_mapTimers.end())
-            {
-                std::cout << "delete_timer(),can't find timer = " << timer_id << std::endl;
+        virtual int deleteTimer(uint64_t timerId) override
+        {
+            std::lock_guard<std::mutex> lock(mMLock);
+            auto it = mMapTimers.find(timerId);
+            if (it != mMapTimers.end()) {
+                mQTimers.remove(it->second);
+                mMapTimers.erase(it);
                 return 0;
             }
-
-            auto timer = m_mapTimers[timer_id];
-            m_QTimers.remove(timer);
-            m_mapTimers.erase(timer_id);
-            timer = nullptr;
-            return 0;
+            return -1;
         }
 
-        virtual size_t count() override {
-            return m_QTimers.size();
+        virtual size_t count() override
+        {
+            std::lock_guard<std::mutex> lock(mMLock);
+            return mMapTimers.size();
         }
 
-        virtual int run_loop() override {
-            m_isRunning = true;
-            m_stopped = false;
-            while (m_isRunning)
-            {
-                auto timeNow = gettime_msec();
-                m_mLock.lock();
-                if (m_mapTimers.size() == 0)
-                {
-                    m_mLock.unlock();
-                    msleep(1);
-                    continue;
-                }
-
-                uint64_t timer_id;
-                auto timer = m_QTimers.top();
-                timer_id = timer->start_id;
-                if (timeNow < timer->timeout)
-                {
-                    m_mLock.unlock();
-                    usleep(1); //sleep 1 million second
-                    continue;
-                }
-                m_QTimers.remove(timer);
-                m_mLock.unlock();
-
-                if (timer->lamdaCb != nullptr) {
-                    timer->lamdaCb();
-                }
-
-                m_mLock.lock();
-
-                if (m_mapTimers.find(timer_id) != m_mapTimers.end()) {
-
-                    if (timer->repeat) {
-                        // repeated timer
-                        timer->timeout += timer->delay_msec;
-                        m_QTimers.push(timer);
+        virtual int runLoop() override
+        {
+            mIsRunning = true;
+            mStopped = false;
+            while (mIsRunning) {
+                std::lock_guard<std::mutex> lock(mMLock);
+                uint64_t now = getTimeMsec();
+                while (!mQTimers.empty()) {
+                    TimerPtr timer = mQTimers.top();
+                    if (timer->timeout > now) {
+                        break;
                     }
-                    else {
-                        // oneshot timer
-                        m_mapTimers.erase(timer_id);
+                    mQTimers.pop();
+                    auto it = mMapTimers.find(timer->start_id);
+                    if (it != mMapTimers.end()) {
+                        if (timer->repeat != 0) {
+                            timer->timeout = now + timer->delay_msec;
+                            if (timer->repeat > 0) timer->repeat --;
+                            mQTimers.push(timer);
+                        } else {
+                            mMapTimers.erase(it);
+                        }
+                        mMLock.unlock();
+                        timer->lamdaCb();
+                        mMLock.lock();
                     }
                 }
-                else {
-                    // timer is deleted, not existed any more.
-                }
 
-                m_mLock.unlock();
+                mMLock.unlock();
             }
             std::cout << "rtc_timer_queue exit!" << std::endl;
-            m_stopped = true;
+            mStopped = true;
             return 1;
         }
 
         virtual int stop() override {
-            m_isRunning = false;
+            mIsRunning = false;
             return 0;
         }
     };
@@ -224,55 +193,53 @@ namespace otl {
 
 
     class StatToolImpl: public StatTool {
-        struct statis_layer {
+        struct StatisLayer {
             uint64_t bytes;
-            uint64_t time_msec;
-            statis_layer() :bytes(0),time_msec(0){}
+            uint64_t timeMsec;
+            StatisLayer() :bytes(0),timeMsec(0){}
         };
-
-        statis_layer *m_layers;
-        int m_current_index;
-        uint32_t m_total_layers;
-        uint32_t m_record_count{0};
-        int64_t m_statis_count{0};
-        int64_t m_statis_update_last_time;
+        StatisLayer *mLayers;
+        int mCurrentIndex;
+        uint32_t mTotalLayers;
+        uint32_t mRecordCount{0};
+        int64_t mStatisCount{0};
+        int64_t mStatisUpdateLastTime;
 
     public:
-        StatToolImpl(int range=5):m_current_index(0),m_record_count(0) {
-            m_total_layers = range;
-            m_layers = new statis_layer[range];
-            assert(NULL != m_layers);
+        StatToolImpl(int range=5):mCurrentIndex(0),mRecordCount(0) {
+            mTotalLayers = range;
+            mLayers = new StatisLayer[range];
+            assert(NULL != mLayers);
         }
         virtual ~StatToolImpl(){
-            delete []m_layers;
+            delete []mLayers;
         };
 
         virtual void update(uint64_t currentStatis) override {
-            m_statis_count += currentStatis;
-            auto now = gettime_msec();
-            if (m_statis_update_last_time > 0 && now - m_statis_update_last_time < 1000) {
+            mStatisCount += currentStatis;
+            auto now = getTimeMsec();
+            if (mStatisUpdateLastTime > 0 && now - mStatisUpdateLastTime < 1000) {
                 return;
             }
 
-            m_statis_update_last_time = now;
-            uint32_t current_index = m_current_index;
-            m_layers[current_index].time_msec = now;
-            m_layers[current_index].bytes = m_statis_count;
+            mStatisUpdateLastTime = now;
+            uint32_t currentIndex = mCurrentIndex;
+            mLayers[currentIndex].timeMsec = now;
+            mLayers[currentIndex].bytes = mStatisCount;
 
-            current_index = (current_index+1) % m_total_layers;
-            m_current_index = current_index;
+            currentIndex = (currentIndex+1) % mTotalLayers;
+            mCurrentIndex = currentIndex;
 
-            if (m_record_count < m_total_layers)
+            if (mRecordCount < mTotalLayers)
             {
-                m_record_count++;
+                mRecordCount++;
             }
         }
-
         virtual void reset() override {
-            m_current_index = 0;
-            m_record_count = 0;
+            mCurrentIndex = 0;
+            mRecordCount = 0;
 
-            memset(m_layers, 0, sizeof(m_layers[0]) * m_total_layers);
+            memset(mLayers, 0, sizeof(mLayers[0]) * mTotalLayers);
         }
 
         virtual double getkbps() override {
@@ -283,25 +250,25 @@ namespace otl {
             uint32_t currentIndex = 0;
             uint32_t newest, oldest;
             double bps = 0.0;
-            uint64_t time_diff = 0, byte_diff;
+            uint64_t timeDiff = 0, byteDiff;
 
-            currentIndex = m_current_index;
-            if (m_record_count < m_total_layers)
+            currentIndex = mCurrentIndex;
+            if (mRecordCount < mTotalLayers)
             {
                 newest = currentIndex > 0 ? currentIndex - 1 : 0;
                 oldest = 0;
             }
             else
             {
-                newest = (m_total_layers + (currentIndex - 1)) % m_total_layers;
+                newest = (mTotalLayers + (currentIndex - 1)) % mTotalLayers;
                 oldest = currentIndex;
             }
 
 
-            time_diff = m_layers[newest].time_msec - m_layers[oldest].time_msec;
-            byte_diff = m_layers[newest].bytes - m_layers[oldest].bytes;
+            timeDiff = mLayers[newest].timeMsec - mLayers[oldest].timeMsec;
+            byteDiff = mLayers[newest].bytes - mLayers[oldest].bytes;
 
-            bps = (double)(byte_diff) * 1000 / (time_diff);
+            bps = (double)(byteDiff) * 1000 / (timeDiff);
             return bps;
         }
     };

@@ -1,3 +1,4 @@
+#include "otl.h"
 #include "stream_decode_hw.h"
 #include "stream_sei.h"
 
@@ -367,8 +368,8 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
 
     AVDictionary *opts = nullptr;
 
-    int card_id = 0;
-    int vid = 0;
+    int card_id = OTL_GET_INT32_HIGH16(mId);
+    int vid = OTL_GET_INT32_LOW16(mId);;
     av_dict_set_int(&mOptsDecoder, "card_id", card_id, 0);
     av_dict_set_int(&mOptsDecoder, "vpu_id", vid, 0);
     av_dict_set(&mOptsDecoder, "output_pixfmt", "yuv420p", 0);
@@ -377,7 +378,8 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
     sprintf(tmp, "/dev/gcu%dvid%d", card_id, vid);
     av_dict_set(&opts, "dec", tmp, 0);
     av_dict_set(&opts, "enc", tmp, 0);
-    av_dict_set(&opts, "mem", "/dev/gcu0", 0);
+    sprintf(tmp, "/dev/gcu%d", card_id);
+    av_dict_set(&opts, "mem", tmp, 0);
     av_dict_set(&opts, "mapped_io", "1", 0);
 
     if (av_hwdevice_ctx_create(&mHWDeviceCtx, mHWDevType, nullptr, opts, 0) < 0) {

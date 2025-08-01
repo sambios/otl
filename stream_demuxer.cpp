@@ -100,7 +100,7 @@ int StreamDemuxer::doService() {
                 }
                 frameIndex = 0;
                 m_startTime = av_gettime();
-                printf("seek_to_start\n");
+                //printf("seek_to_start\n");
                 continue;
             } else {
                 printf("file[%d] end!\n", m_id);

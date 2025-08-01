@@ -12,6 +12,8 @@
 #include <queue>
 #include <assert.h>
 #include <memory.h>
+#include <condition_variable>
+#include <atomic>
 
 namespace otl {
 
@@ -86,108 +88,201 @@ namespace otl {
         }
     };
 
-    class TimerQueueImpl: public TimerQueue {
-        int generateTimer(uint32_t delayMsec, std::function<void()> func, int repeat, uint64_t *pTimerId);
-        std::unordered_map<uint64_t, TimerPtr> mMapTimers;
-        MinHeap<TimerPtr> mQTimers;
-        uint64_t mNTimerSN;
-        std::mutex mMLock;
-        bool mIsRunning;
-        bool mStopped;
+    // �Ż��Ķ�ʱ���ṹ
+    struct OptimizedTimer {
+        std::function<void()> callback;
+        uint64_t nextTimeout;     // �´δ���ʱ��
+        uint64_t intervalMsec;    // �ظ����
+        int repeatCount;          // �ظ����� (-1��ʾ�����ظ�)
+        uint64_t timerId;         // ��ʱ��ID
+        bool isValid;             // �Ƿ���Ч�����ڱ��ɾ����
+        
+        OptimizedTimer() : isValid(true) {}
+    };
+
+    using OptimizedTimerPtr = std::shared_ptr<OptimizedTimer>;
+
+    // ��ʱ���Ƚ�������С�ѣ�
+    struct OptimizedTimerComp {
+        bool operator()(const OptimizedTimerPtr& a, const OptimizedTimerPtr& b) const {
+            return a->nextTimeout > b->nextTimeout;
+        }
+    };
+
+    class TimerQueueImpl : public TimerQueue {
+    private:
+        // ʹ�����ȶ�����Ϊ��С��
+        std::priority_queue<OptimizedTimerPtr, std::vector<OptimizedTimerPtr>, OptimizedTimerComp> m_timerHeap;
+        
+        // ��ʱ��ӳ������ڿ��ٲ��Һ�ɾ��
+        std::unordered_map<uint64_t, OptimizedTimerPtr> m_timerMap;
+        
+        // ͬ��ԭ��
+        std::mutex m_mutex;
+        std::condition_variable m_condition;
+        
+        // ����״̬
+        std::atomic<bool> m_running{false};
+        std::atomic<bool> m_stopped{true};
+        
+        // ��ʱ��ID������
+        std::atomic<uint64_t> m_nextTimerId{1};
+        
+        // ������Ч�Ķ�ʱ�����ڶѶ���
+        void cleanupInvalidTimers() {
+            while (!m_timerHeap.empty() && !m_timerHeap.top()->isValid) {
+                m_timerHeap.pop();
+            }
+        }
 
     public:
-        TimerQueueImpl():mNTimerSN(0), mIsRunning(false), mStopped(false) {
-            std::cout << "TimerQueueImpl ctor" << std::endl;
+        TimerQueueImpl() {
+            std::cout << "TimerQueueImpl ctor (optimized)" << std::endl;
         }
 
         virtual ~TimerQueueImpl() {
-            std::cout << "TimerQueueImpl dtor" << std::endl;
+            std::cout << "TimerQueueImpl dtor (optimized)" << std::endl;
             stop();
         }
 
         virtual int createTimer(uint32_t delayMsec, uint32_t skew, std::function<void()> func, int repeat, uint64_t *pTimerId) override
         {
-            RTC_RETURN_EXP_IF_FAIL(func != nullptr , return -1);
-            TimerPtr timer = std::make_shared<Timer>();
-            if (NULL == timer)
-            {
+            if (!func) {
                 return -1;
             }
-
-            timer->lamdaCb = func;
-            timer->timeout = getTimeMsec() + skew;
-            timer->delay_msec = delayMsec;
-            timer->start_id = mNTimerSN ++;
-            timer->repeat = repeat;
+            
+            auto timer = std::make_shared<OptimizedTimer>();
+            timer->callback = std::move(func);
+            timer->nextTimeout = getTimeMsec() + skew;
+            timer->intervalMsec = delayMsec;
+            timer->repeatCount = repeat;
+            timer->timerId = m_nextTimerId.fetch_add(1);
+            timer->isValid = true;
+            
             {
-                std::lock_guard<std::mutex> lock(mMLock);
-                mMapTimers[timer->start_id] = timer;
-                mQTimers.push(timer);
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_timerMap[timer->timerId] = timer;
+                m_timerHeap.push(timer);
             }
-            if (pTimerId) *pTimerId = timer->start_id;
+            
+            // ֪ͨ�����߳����µĶ�ʱ��
+            m_condition.notify_one();
+            
+            if (pTimerId) {
+                *pTimerId = timer->timerId;
+            }
+            
             return 0;
         }
 
         virtual int deleteTimer(uint64_t timerId) override
         {
-            std::lock_guard<std::mutex> lock(mMLock);
-            auto it = mMapTimers.find(timerId);
-            if (it != mMapTimers.end()) {
-                mQTimers.remove(it->second);
-                mMapTimers.erase(it);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            
+            auto it = m_timerMap.find(timerId);
+            if (it != m_timerMap.end()) {
+                // ���Ϊ��Ч�������������Ӷ���ɾ��
+                it->second->isValid = false;
+                m_timerMap.erase(it);
                 return 0;
             }
+            
             return -1;
         }
 
         virtual size_t count() override
         {
-            std::lock_guard<std::mutex> lock(mMLock);
-            return mMapTimers.size();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_timerMap.size();
         }
 
         virtual int runLoop() override
         {
-            mIsRunning = true;
-            mStopped = false;
-            while (mIsRunning) {
-
-                uint64_t now = getTimeMsec();
-                mMLock.lock();
-                if (mQTimers.empty()) {
-                    mMLock.unlock();
-                    msleep(1);
+            m_running = true;
+            m_stopped = false;
+            
+            std::cout << "TimerQueue runLoop started (optimized)" << std::endl;
+            
+            while (m_running) {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                
+                // ������Ч�Ķ�ʱ��
+                cleanupInvalidTimers();
+                
+                if (m_timerHeap.empty()) {
+                    // û�ж�ʱ�����ȴ��µĶ�ʱ�����
+                    m_condition.wait(lock, [this] { 
+                        return !m_running || !m_timerHeap.empty(); 
+                    });
                     continue;
                 }
-
-                TimerPtr timer = mQTimers.top();
-                if (timer->timeout > now) {
-                    mMLock.unlock();
+                
+                auto nextTimer = m_timerHeap.top();
+                uint64_t currentTime = getTimeMsec();
+                
+                if (nextTimer->nextTimeout > currentTime) {
+                    // ���㾫ȷ�ĵȴ�ʱ��
+                    uint64_t waitTime = nextTimer->nextTimeout - currentTime;
+                    
+                    // �ȴ�ָ��ʱ���ֱ�����µĶ�ʱ�����
+                    auto waitResult = m_condition.wait_for(lock, 
+                        std::chrono::milliseconds(waitTime),
+                        [this] { return !m_running; });
+                    
+                    if (!m_running) {
+                        break;
+                    }
+                    
+                    // ���¼��ʱ�䣬�������µĸ���Ķ�ʱ��
                     continue;
                 }
-
-                mQTimers.pop();
-                if (timer->repeat) {
-                    // readd it
-                    timer->timeout = now + timer->delay_msec;
-                    mQTimers.push(timer);
-                }else {
-                    auto it = mMapTimers.find(timer->start_id);
-                    if (it != mMapTimers.end()) {
-                        mMapTimers.erase(it);
+                
+                // ��ʱ�����ڣ�ִ�лص�
+                m_timerHeap.pop();
+                
+                // ����Ƿ���Ҫ���µ���
+                bool needReschedule = false;
+                if (nextTimer->isValid) {
+                    if (nextTimer->repeatCount == -1) {
+                        // �����ظ�
+                        needReschedule = true;
+                    } else if (nextTimer->repeatCount > 0) {
+                        // �����ظ�
+                        nextTimer->repeatCount--;
+                        needReschedule = (nextTimer->repeatCount > 0);
+                    }
+                    
+                    if (needReschedule) {
+                        nextTimer->nextTimeout = currentTime + nextTimer->intervalMsec;
+                        m_timerHeap.push(nextTimer);
+                    } else {
+                        // ��ʱ����ɣ���ӳ�����ɾ��
+                        m_timerMap.erase(nextTimer->timerId);
                     }
                 }
-                mMLock.unlock();
-                timer->lamdaCb();
+                
+                // �ͷ�����ִ�лص�������ص��еĳ�ʱ�����������ʱ��
+                lock.unlock();
+                
+                if (nextTimer->isValid) {
+                    try {
+                        nextTimer->callback();
+                    } catch (const std::exception& e) {
+                        std::cerr << "Timer callback exception: " << e.what() << std::endl;
+                    } catch (...) {
+                        std::cerr << "Timer callback unknown exception" << std::endl;
+                    }
+                }
             }
-
-            std::cout << "rtc_timer_queue exit!" << std::endl;
-            mStopped = true;
-            return 1;
+            
+            std::cout << "TimerQueue runLoop exit (optimized)" << std::endl;
+            m_stopped = true;
+            return 0;
         }
 
         virtual int stop() override {
-            mIsRunning = false;
+            m_running = false;
+            m_condition.notify_all();
             return 0;
         }
     };

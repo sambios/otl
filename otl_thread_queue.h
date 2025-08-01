@@ -17,7 +17,7 @@
 #include <functional>
 #include <thread>
 
-#ifdef __linux__
+#if  defined(__linux__) || defined(__APPLE__)
 
 #include <sys/time.h>
 

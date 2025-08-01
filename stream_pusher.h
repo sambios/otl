@@ -3,121 +3,91 @@
 
 #include <iostream>
 #include <thread>
-#include <chrono>
-#include <cassert>
-#include <numeric>
-#include <list>
+#include <queue>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <string>
+#include "timestamp_smoother.h"
 #include "otl_ffmpeg.h"
 
-namespace otl {
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+}
 
-    class TimestampCorrector {
+namespace otl {
+namespace internal {
+    template<typename T>
+    class BlockingQueue {
     private:
-        // 修正后的历史时间戳（严格单调递增）
-        std::vector<double> corrected_history_;
-        // 历史时间间隔（用于计算趋势）
-        std::vector<double> deltas_;
-        // 最近N个间隔用于计算参考趋势（窗口大小）
-        size_t window_size_;
-        // 最小时间间隔（确保严格递增）
-        double epsilon_;
-        // 对原始时间戳的信任因子（0~1，越大越依赖原始值）
-        double trust_factor_;
+        std::queue<T> m_queue;
+        mutable std::mutex m_mutex;
+        std::condition_variable m_condition;
+        bool m_shutdown{false};
 
     public:
-        /**
-         * 构造函数
-         * @param window_size 计算历史趋势的窗口大小
-         * @param epsilon 最小时间间隔
-         * @param trust_factor 对原始时间戳的信任度（0~1）
-         */
-        TimestampCorrector(
-            size_t window_size = 5,
-            double epsilon = 1e-6,
-            double trust_factor = 0.7
-        ) : window_size_(window_size), epsilon_(epsilon), trust_factor_(trust_factor) {
-            if (trust_factor < 0 || trust_factor > 1) {
-                throw std::invalid_argument("trust_factor must be in [0, 1]");
-            }
-            if (epsilon <= 0) {
-                throw std::invalid_argument("epsilon must be positive");
+        void push(T item) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_shutdown) {
+                m_queue.push(item);
+                m_condition.notify_one();
             }
         }
 
-        /**
-         * 修正新到来的时间戳
-         * @param raw_timestamp 新帧的原始时间戳
-         * @return 修正后的时间戳
-         */
-        double correct(double raw_timestamp) {
-            if (corrected_history_.empty()) {
-                // 第一帧：直接使用原始时间戳作为起点
-                corrected_history_.push_back(raw_timestamp);
-                return raw_timestamp;
-            }
-
-            // 历史最后一帧的时间戳（当前帧必须大于此值）
-            double last_corrected = corrected_history_.back();
-
-            // 1. 计算历史趋势：基于最近window_size个间隔的平均值
-            double ref_delta = epsilon_; // 默认最小间隔
-            if (!deltas_.empty()) {
-                // 取最近的window_size个间隔（或全部间隔）
-                size_t start = std::max(0LL, static_cast<long long>(deltas_.size()) - static_cast<long long>(window_size_));
-                std::vector<double> recent_deltas(deltas_.begin() + start, deltas_.end());
-
-                // 计算平均间隔作为参考趋势
-                ref_delta = std::accumulate(recent_deltas.begin(), recent_deltas.end(), 0.0)
-                          / recent_deltas.size();
-                ref_delta = std::max(ref_delta, epsilon_); // 确保参考间隔为正数
-            }
-
-            // 2. 预测合理的时间戳范围（基于历史趋势）
-            double predicted_min = last_corrected + epsilon_;          // 最小可能值（必须大于上一帧）
-            double predicted = last_corrected + ref_delta;             // 基于历史的预测值
-            double predicted_max = predicted + 2 * ref_delta;          // 最大合理值（允许一定波动）
-
-            // 3. 根据原始时间戳的合理性进行修正
-            double corrected;
-            if (raw_timestamp > predicted_min) {
-                if (raw_timestamp <= predicted_max) {
-                    // 原始值在合理范围内：加权融合原始值和预测值
-                    corrected = trust_factor_ * raw_timestamp + (1 - trust_factor_) * predicted;
-                } else {
-                    // 原始值偏大：限制在合理最大值附近
-                    corrected = predicted_max;
-                }
+        bool pop(T& item, int timeoutMs = -1) {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            
+            if (timeoutMs < 0) {
+                // Wait indefinitely until item available or shutdown
+                m_condition.wait(lock, [this] { return !m_queue.empty() || m_shutdown; });
             } else {
-                // 原始值偏小（<= 上一帧）：使用历史预测值
-                corrected = predicted;
+                // Wait with timeout
+                if (!m_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs), 
+                                         [this] { return !m_queue.empty() || m_shutdown; })) {
+                    return false; // Timeout
+                                         }
             }
-
-            // 最终确保严格递增（防御性处理）
-            corrected = std::max(corrected, last_corrected + epsilon_);
-
-            // 4. 更新历史数据
-            corrected_history_.push_back(corrected);
-            deltas_.push_back(corrected - last_corrected);
-
-            return corrected;
+            
+            if (m_shutdown && m_queue.empty()) {
+                return false; // Shutdown and no more items
+            }
+            
+            if (!m_queue.empty()) {
+                item = m_queue.front();
+                m_queue.pop();
+                return true;
+            }
+            
+            return false;
         }
 
-        /**
-         * 获取修正后的历史时间戳
-         */
-        const std::vector<double>& get_corrected_history() const {
-            return corrected_history_;
+        size_t size() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_queue.size();
         }
 
-        /**
-         * 重置修正器（清空历史数据）
-         */
+        bool empty() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_queue.empty();
+        }
+
+        void shutdown() {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_shutdown = true;
+            m_condition.notify_all();
+        }
+
         void reset() {
-            corrected_history_.clear();
-            deltas_.clear();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_shutdown = false;
+            // Clear any remaining items
+            while (!m_queue.empty()) {
+                m_queue.pop();
+            }
         }
     };
+}
 
     class FfmpegOutputer : public FfmpegGlobal {
         enum State {
@@ -130,15 +100,14 @@ namespace otl {
         bool m_threadOutputIsRunning{false};
 
         State m_outputState;
-        std::mutex m_listPacketsLock;
-        std::list<AVPacket *> m_listPackets;
+        internal::BlockingQueue<AVPacket *> m_packetQueue;
         bool m_repeat{true};
-
+        TimestampSmoother m_timestampSmoother;
+        
+        // 保留原有变量用于兼容性（已弃用）
         int64_t m_globalPts{0};
-        int64_t m_lastGlobalPts{0};
         int64_t m_lastPts{0};
         int64_t m_ptsBase{0};
-        TimestampCorrector m_tsAdjust;
 
         bool stringStartWith(const std::string &s, const std::string &prefix) {
             return (s.compare(0, prefix.size(), prefix) == 0);
@@ -174,41 +143,49 @@ namespace otl {
 
         void outputService() {
             int ret = 0;
-            while (m_listPackets.size() > 0) {
-                m_listPacketsLock.lock();
-                AVPacket *pkt = m_listPackets.front();
-                m_listPackets.pop_front();
-                m_listPacketsLock.unlock();
-
-                if (pkt->dts != AV_NOPTS_VALUE && m_globalPts >= pkt->dts)
-                {
-                    //m_globalPts =  m_ptsBase + m_lastPts - pkt->pts;
-                    //pkt->dts = pkt->pts = m_globalPts;
+            AVPacket *pkt = nullptr;
+            
+            // Try to get a packet with a short timeout to allow for responsive shutdown
+            if (m_packetQueue.pop(pkt, 10)) { // 10ms timeout
+                // 使用时间戳平滑器处理时间戳
+                if (m_timestampSmoother.smoothTimestamp(pkt)) {
+                    ret = av_interleaved_write_frame(m_ofmtCtx, pkt);
+                    if (ret != 0) {
+                        char errorBuf[256];
+                        av_strerror(ret, errorBuf, sizeof(errorBuf));
+                        std::cout << "av_interleaved_write_frame err: " << ret 
+                                  << " (" << errorBuf << ")" << std::endl;
+                        
+                        // 如果是时间戳相关错误，打印统计信息
+                        if (ret == AVERROR(EINVAL)) {
+                            m_timestampSmoother.printStatistics();
+                        }
+                    }
+                } else {
+                    std::cout << "Failed to smooth timestamp for packet" << std::endl;
                 }
-
-                pkt->dts = m_tsAdjust.correct(pkt->dts);
-                pkt->pts = pkt->dts;
-                ret = av_interleaved_write_frame(m_ofmtCtx, pkt);
+                
                 av_packet_free(&pkt);
-                if (ret != 0) {
-                    std::cout << "av_interleaved_write_frame err" << ret << std::endl;
-                    // m_output_state = DOWN;
-                    // break;
-                }
             }
-
         }
 
         void outputDown() {
             if (m_repeat) {
                 m_outputState = Init;
             } else {
+                // Process any remaining packets before shutdown
+                AVPacket *pkt = nullptr;
+                while (m_packetQueue.pop(pkt, 0)) { // Non-blocking pop to drain queue
+                    av_packet_free(&pkt);
+                }
+                
                 av_write_trailer(m_ofmtCtx);
                 if (!(m_ofmtCtx->oformat->flags & AVFMT_NOFILE)) {
                     avio_closep(&m_ofmtCtx->pb);
                 }
 
-                // Set exit flag
+                // Shutdown the queue and set exit flag
+                m_packetQueue.shutdown();
                 m_threadOutputIsRunning = false;
             }
         }
@@ -245,6 +222,9 @@ namespace otl {
             int ret = 0;
             const char *formatName = NULL;
             m_url = url;
+            
+            // 重置时间戳平滑器
+            m_timestampSmoother.reset();
 
             if (stringStartWith(m_url, "rtsp://")) {
                 formatName = "rtsp";
@@ -324,21 +304,70 @@ namespace otl {
         int inputPacket(const AVPacket *pkt) {
             AVPacket *pkt1 = av_packet_alloc();
             av_packet_ref(pkt1, pkt);
-            m_listPacketsLock.lock();
-            m_listPackets.push_back(pkt1);
-            m_listPacketsLock.unlock();
+            m_packetQueue.push(pkt1);
             return 0;
         }
-
+        
+        /**
+         * 配置时间戳平滑参数
+         * @param smoothingFactor 平滑系数 (0.01-1.0)，越小越平滑
+         * @param maxJumpThreshold 最大允许跳跃阈值
+         * @param minIncrement 最小时间戳增量
+         */
+        void configureTimestampSmoother(double smoothingFactor = 0.1, 
+                                       int64_t maxJumpThreshold = 90000, 
+                                       int64_t minIncrement = 3000) {
+            m_timestampSmoother.setSmoothingParameters(smoothingFactor, maxJumpThreshold, minIncrement);
+        }
+        
+        /**
+         * 为不同场景预设时间戳平滑参数
+         */
+        void setTimestampSmoothingPreset(const std::string& preset) {
+            if (preset == "conservative") {
+                // 保守模式：较少干预，适合时间戳相对准确的流
+                m_timestampSmoother.setSmoothingParameters(0.05, 180000, 1000);
+            } else if (preset == "aggressive") {
+                // 激进模式：强力平滑，适合时间戳很不准确的流
+                m_timestampSmoother.setSmoothingParameters(0.3, 30000, 3000);
+            } else if (preset == "looping") {
+                // 回环模式：专门处理文件回环的情况
+                m_timestampSmoother.setSmoothingParameters(0.1, 45000, 2000);
+            } else {
+                // 默认模式：平衡的设置
+                m_timestampSmoother.setSmoothingParameters(0.1, 90000, 3000);
+            }
+            
+            std::cout << "Timestamp smoothing preset set to: " << preset << std::endl;
+        }
+        
+        /**
+         * 获取时间戳平滑统计信息
+         */
+        void getTimestampStatistics(int64_t& totalPackets, int64_t& correctedPackets, double& correctionRate) const {
+            m_timestampSmoother.getStatistics(totalPackets, correctedPackets, correctionRate);
+        }
+        
         int closeOutputStream() {
             std::cout << "call CloseOutputStream()" << std::endl;
+            
+            // 打印时间戳平滑统计信息
+            m_timestampSmoother.printStatistics();
+            
             m_repeat = false;
             m_outputState = Down;
+            
+            // Signal shutdown to unblock any waiting operations
+            m_packetQueue.shutdown();
+            
             if (m_threadOutput) {
                 m_threadOutput->join();
                 delete m_threadOutput;
                 m_threadOutput = nullptr;
             }
+
+            // Reset the queue for potential reuse
+            m_packetQueue.reset();
 
             if (m_ofmtCtx) {
                 avformat_free_context(m_ofmtCtx);

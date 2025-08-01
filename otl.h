@@ -40,6 +40,5 @@ namespace fs = std::experimental::filesystem;
 #include "otl_timer.h"
 #include "otl_image.h"
 #include "otl_string.h"
-#include "stream_decode.h"
 
 #endif //OTL_H

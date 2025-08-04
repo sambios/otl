@@ -15,6 +15,8 @@
 #include <memory>
 #include <cstdarg>
 #include <algorithm>
+#include <sys/syscall.h>
+#include <cstring>
 
 // Network headers for Telnet server
 #ifdef _WIN32

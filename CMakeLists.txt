@@ -4,8 +4,8 @@ project(otl)
 
 set(CMAKE_CXX_STANDARD 14)
 
-option(USE_HW_CODEC "use hardware accelerator" ON)
-option(USE_TOPS_FFMPEG "use Tops ffmpeg" ON)
+option(USE_HW_CODEC "use hardware accelerator" OFF)
+option(USE_TOPS_FFMPEG "use Tops ffmpeg" OFF)
 
 add_compile_options(-fsanitize=address)
 

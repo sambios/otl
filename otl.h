@@ -1,7 +1,6 @@
 //
 // Created by yuan on 1/22/21.
 //
-
 #ifndef OTL_H
 #define OTL_H
 
@@ -23,17 +22,22 @@
 #if __cplusplus >= 201703L
     #if defined(__GNUC__) && __GNUC__ < 9
         // GCC 8支持C++17但需要链接stdc++fs库，且位于experimental命名空间
+        #ifdef __linux__
+                #include <experimental/filesystem>
+                namespace fs = std::experimental::filesystem;
+        #endif
+
+   #else
+        // 其他支持C++17的编译器（GCC9+、Clang7+、MSVC2017+）
+        #include <filesystem>
+        namespace fs = std::filesystem;
+    #endif
+#else
+    // C++17之前的版本，使用experimental版本
+    #ifdef __linux__
         #include <experimental/filesystem>
         namespace fs = std::experimental::filesystem;
-#else
-// 其他支持C++17的编译器（GCC9+、Clang7+、MSVC2017+）
-#include <filesystem>
-namespace fs = std::filesystem;
-#endif
-#else
-// C++17之前的版本，使用experimental版本
-#include <experimental/filesystem>
-namespace fs = std::experimental::filesystem;
+    #endif
 #endif
 
 /**

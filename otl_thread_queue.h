@@ -330,6 +330,7 @@ public:
 
     void setCPU(std::thread &th) {
         static auto cpu_count = std::thread::hardware_concurrency();
+#ifndef __APPLE__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(cpu_index++ % cpu_count, &cpuset);
@@ -342,6 +343,7 @@ public:
         } else {
             std::cout << "[SUCCESS] caling pthread_setaffinity_np success, " << cpu_index << std::endl;
         }
+#endif
     }
 
     int stopWork() {

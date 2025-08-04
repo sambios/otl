@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 14)
 option(USE_HW_CODEC "use hardware accelerator" ON)
 option(USE_TOPS_FFMPEG "use Tops ffmpeg" ON)
 
+add_compile_options(-fsanitize=address)
+
 set(UTILITY_TOP ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (NOT USE_TOPS_FFMPEG)
@@ -45,6 +47,7 @@ add_library(otl stream_sei.cpp
         otl_timer.cpp
         otl_string.cpp
         optimized_timer.cpp
+        otl_log.cpp
         ${DECODE_SRC}
         )
 
@@ -58,4 +61,14 @@ add_executable(timestamp_test timestamp_test.cpp)
 target_link_libraries(timestamp_test otl
 	${FFMPEG_LINK_LIBS}
 	pthread)
+
+add_executable(log_test test_log.cpp)
+target_link_libraries(log_test otl
+        ${FFMPEG_LINK_LIBS}
+        pthread)
+
+add_executable(log_telnet_test test_telnet.cpp)
+target_link_libraries(log_telnet_test otl
+        ${FFMPEG_LINK_LIBS}
+        pthread)
 

@@ -7,8 +7,6 @@ set(CMAKE_CXX_STANDARD 14)
 option(USE_HW_CODEC "use hardware accelerator" OFF)
 option(USE_TOPS_FFMPEG "use Tops ffmpeg" OFF)
 
-add_compile_options(-fsanitize=address)
-
 set(UTILITY_TOP ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (NOT USE_TOPS_FFMPEG)

@@ -4,6 +4,15 @@
 
 namespace otl {
 
+void print_ffmpeg_error(int err_code) {
+    char err_buf[1024];
+
+    // 使用 av_strerror 将错误码转换为字符串
+    av_strerror(err_code, err_buf, sizeof(err_buf));
+    
+    printf("FFmpeg 错误: %s (错误码: %d)\n", err_buf, err_code);
+}
+
 // 硬件加速格式选择回调函数
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
     StreamDecoder *decoder = static_cast<StreamDecoder*>(ctx->opaque);
@@ -26,7 +35,7 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder)
     mId = id;
     mOptsDecoder = nullptr;
     strcpy(mszHWDevTypeName, "vsv");
-    mHwPixFmt = AV_PIX_FMT_QSV; // 设置默认硬件像素格式
+    mHwPixFmt = AV_PIX_FMT_VSV; // 设置默认硬件像素格式
 }
 
 StreamDecoder::~StreamDecoder() {
@@ -42,60 +51,112 @@ StreamDecoder::~StreamDecoder() {
 }
 
 int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame) {
-    AVCodecContext *decCtx = nullptr;
+       AVCodecContext* decCtx = nullptr;
     if (nullptr == mExternalDecCtx) {
         decCtx = mDecCtx;
-    } else {
+    }
+    else {
         decCtx = mExternalDecCtx;
     }
 
-#if LIBAVCODEC_VERSION_MAJOR > 56
     int gotPicture = 0;
+
+#if LIBAVCODEC_VERSION_MAJOR > 56
+    // 发送数据包到解码器
     int ret = avcodec_send_packet(decCtx, pkt);
-    if (ret == AVERROR_EOF) ret = 0;
-    else if (ret < 0) {
-        printf(" error sending a packet for decoding, decCtx = %p\n", decCtx);
-        exit(0);
-        return -1;
+    if (ret < 0) {
+        if (ret == AVERROR(EAGAIN)) {
+            // 解码器已满，先尝试取帧再重试
+            int receive_ret;
+            do {
+                receive_ret = avcodec_receive_frame(decCtx, pFrame);
+                if (receive_ret >= 0) {
+                    // 成功接收到一帧
+                    gotPicture++;
+                    
+                    // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
+                    if (pFrame->format == mHwPixFmt) {
+                        AVFrame* sw_frame = av_frame_alloc();
+                        if (!sw_frame) {
+                            return AVERROR(ENOMEM);
+                        }
+
+                        // 从 GPU 内存转到 CPU 内存
+                        if ((receive_ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0) {
+                            av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
+                            av_frame_free(&sw_frame);
+                            return receive_ret;
+                        }
+
+                        // 复制时间戳等元数据
+                        av_frame_copy_props(sw_frame, pFrame);
+                        av_frame_unref(pFrame);
+
+                        // 将 sw_frame 数据复制回 pFrame
+                        av_frame_move_ref(pFrame, sw_frame);
+                        av_frame_free(&sw_frame);
+                    }
+                }
+            } while (receive_ret >= 0);
+            
+            // 接收完所有可用帧后，重新尝试发送当前包
+            ret = avcodec_send_packet(decCtx, pkt);
+            if (ret < 0) {
+                printf("Error sending packet after receiving frames: %d\n", ret);
+                print_ffmpeg_error(ret);
+                return ret; // 返回错误码
+            }
+        } else {
+            // 其他错误
+            printf("Error sending packet for decoding, decCtx = %p\n", decCtx);
+            print_ffmpeg_error(ret);
+            return ret; // 返回错误码
+        }
     }
 
-    while (ret >= 0) {
+    // 循环从解码器接收帧（一个数据包可能解码出多帧）
+    while (true) {
         ret = avcodec_receive_frame(decCtx, pFrame);
         if (ret == AVERROR(EAGAIN)) {
-            printf("decoder need more stream!\n");
+            // 需要更多数据包
             break;
-        } else if (ret == AVERROR_EOF) {
+        }
+        else if (ret == AVERROR_EOF) {
             printf("avcodec_receive_frame() err=end of file!\n");
-        }
-
-        if (0 == ret) {
-            gotPicture += 1;
-            
-            // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
-            if (pFrame->format == mHwPixFmt) {
-                AVFrame *sw_frame = av_frame_alloc();
-                if (!sw_frame) {
-                    return AVERROR(ENOMEM);
-                }
-
-                // 从 GPU 内存转到 CPU 内存
-                if ((ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0) {
-                    av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
-                    av_frame_free(&sw_frame);
-                    return ret;
-                }
-
-                // 复制时间戳等元数据
-                av_frame_copy_props(sw_frame, pFrame);
-                av_frame_unref(pFrame);
-                
-                // 将 sw_frame 数据复制回 pFrame
-                av_frame_move_ref(pFrame, sw_frame);
-                av_frame_free(&sw_frame);
-            }
-            
             break;
         }
+        else if (ret < 0) {
+            print_ffmpeg_error(ret);
+            return ret; // 返回错误码
+        }
+
+        gotPicture++;
+
+        // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
+        if (pFrame->format == mHwPixFmt) {
+            AVFrame* sw_frame = av_frame_alloc();
+            if (!sw_frame) {
+                return AVERROR(ENOMEM);
+            }
+
+            // 从 GPU 内存转到 CPU 内存
+            if ((ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0) {
+                av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
+                av_frame_free(&sw_frame);
+                return ret;
+            }
+
+            // 复制时间戳等元数据
+            av_frame_copy_props(sw_frame, pFrame);
+            av_frame_unref(pFrame);
+
+            // 将 sw_frame 数据复制回 pFrame
+            av_frame_move_ref(pFrame, sw_frame);
+            av_frame_free(&sw_frame);
+        }
+        
+        // 如果调用者期望只处理一帧，此处应该可以返回
+        // 但为了支持一次解码多帧，我们继续处理直到需要更多数据
     }
 
     return gotPicture;
@@ -133,7 +194,7 @@ void StreamDecoder::onAvformatOpened(AVFormatContext *ifmtCtx) {
 
 void StreamDecoder::onAvformatClosed() {
     clearPackets();
-    
+    std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
     // 释放硬件设备上下文
     if (mHWDeviceCtx) {
         av_buffer_unref(&mHWDeviceCtx);
@@ -151,7 +212,7 @@ void StreamDecoder::onAvformatClosed() {
 
 int StreamDecoder::onReadFrame(AVPacket *pkt) {
     int ret = 0;
-    //std::cout << __FUNCTION__ << __LINE__ << std::endl;
+   
     if (mVideoStreamIndex != pkt->stream_index) {
         // ignore other streams if not video.
         return 0;
@@ -167,7 +228,6 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
         return 0;
     }
 
-    //std::cout << __FUNCTION__ << __LINE__ << std::endl;
     auto decCtx = mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx;
 
     if (decCtx->codec_id == AV_CODEC_ID_H264) {
@@ -240,7 +300,6 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
     //std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
     AVFrame *frame = av_frame_alloc();
     ret = decodeFrame(pkt, frame);
-
     if (ret < 0) {
         printf("decode failed!\n");
         av_frame_free(&frame);
@@ -277,6 +336,7 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
 }
 
 void StreamDecoder::onReadEof(AVPacket *pkt) {
+    std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
     mFrameDecodedNum = 0;
     clearPackets();
 

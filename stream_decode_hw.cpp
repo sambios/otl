@@ -4,7 +4,20 @@
 
 namespace otl {
 
-    static enum AVPixelFormat gHWPixFormat = AV_PIX_FMT_VSV;
+// 硬件加速格式选择回调函数
+static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+    StreamDecoder *decoder = static_cast<StreamDecoder*>(ctx->opaque);
+    const enum AVPixelFormat *p;
+
+    for (p = pix_fmts; *p != -1; p++) {
+        if (*p == decoder->mHwPixFmt)
+            return *p;
+    }
+
+    // 记录日志但返回第一个可用格式作为回退
+    av_log(ctx, AV_LOG_WARNING, "Failed to get preferred HW surface format, trying alternatives.\n");
+    return pix_fmts[0]; // 回退到解码器提供的第一个格式
+}
 
 StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder)
     : mObserver(nullptr), mExternalDecCtx(decoder) {
@@ -13,10 +26,18 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder)
     mId = id;
     mOptsDecoder = nullptr;
     strcpy(mszHWDevTypeName, "vsv");
+    mHwPixFmt = AV_PIX_FMT_QSV; // 设置默认硬件像素格式
 }
 
 StreamDecoder::~StreamDecoder() {
     std::cout << "~StreamDecoder() dtor..." << std::endl;
+    
+    // 释放硬件设备上下文
+    if (mHWDeviceCtx) {
+        av_buffer_unref(&mHWDeviceCtx);
+        mHWDeviceCtx = nullptr;
+    }
+    
     av_dict_free(&mOptsDecoder);
 }
 
@@ -33,7 +54,8 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame) {
     int ret = avcodec_send_packet(decCtx, pkt);
     if (ret == AVERROR_EOF) ret = 0;
     else if (ret < 0) {
-        printf(" error sending a packet for decoding\n");
+        printf(" error sending a packet for decoding, decCtx = %p\n", decCtx);
+        exit(0);
         return -1;
     }
 
@@ -48,6 +70,30 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame) {
 
         if (0 == ret) {
             gotPicture += 1;
+            
+            // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
+            if (pFrame->format == mHwPixFmt) {
+                AVFrame *sw_frame = av_frame_alloc();
+                if (!sw_frame) {
+                    return AVERROR(ENOMEM);
+                }
+
+                // 从 GPU 内存转到 CPU 内存
+                if ((ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0) {
+                    av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
+                    av_frame_free(&sw_frame);
+                    return ret;
+                }
+
+                // 复制时间戳等元数据
+                av_frame_copy_props(sw_frame, pFrame);
+                av_frame_unref(pFrame);
+                
+                // 将 sw_frame 数据复制回 pFrame
+                av_frame_move_ref(pFrame, sw_frame);
+                av_frame_free(&sw_frame);
+            }
+            
             break;
         }
     }
@@ -87,6 +133,13 @@ void StreamDecoder::onAvformatOpened(AVFormatContext *ifmtCtx) {
 
 void StreamDecoder::onAvformatClosed() {
     clearPackets();
+    
+    // 释放硬件设备上下文
+    if (mHWDeviceCtx) {
+        av_buffer_unref(&mHWDeviceCtx);
+        mHWDeviceCtx = nullptr;
+    }
+    
     if (mDecCtx != nullptr) {
         avcodec_close(mDecCtx);
         avcodec_free_context(&mDecCtx);
@@ -98,7 +151,7 @@ void StreamDecoder::onAvformatClosed() {
 
 int StreamDecoder::onReadFrame(AVPacket *pkt) {
     int ret = 0;
-
+    //std::cout << __FUNCTION__ << __LINE__ << std::endl;
     if (mVideoStreamIndex != pkt->stream_index) {
         // ignore other streams if not video.
         return 0;
@@ -114,6 +167,7 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
         return 0;
     }
 
+    //std::cout << __FUNCTION__ << __LINE__ << std::endl;
     auto decCtx = mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx;
 
     if (decCtx->codec_id == AV_CODEC_ID_H264) {
@@ -183,6 +237,7 @@ int StreamDecoder::onReadFrame(AVPacket *pkt) {
         }
     }
 
+    //std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
     AVFrame *frame = av_frame_alloc();
     ret = decodeFrame(pkt, frame);
 
@@ -291,9 +346,34 @@ AVCodecID StreamDecoder::getVideoCodecId() {
 
     int ret = 0;
 
+int StreamDecoder::initHWConfig(int devId, int vpuId) {
+    // 根据设备ID配置硬件加速类型
+    sprintf(mszHWDevTypeName, "vsv");  // 可以根据 devId 选择不同的设备类型
+    
+    mHWDevType = av_hwdevice_find_type_by_name(mszHWDevTypeName);
+    if (mHWDevType == AV_HWDEVICE_TYPE_NONE) {
+        fprintf(stderr, "Device type %s is not supported.\n", mszHWDevTypeName);
+        fprintf(stderr, "Available device types:");
+        while ((mHWDevType = av_hwdevice_iterate_types(mHWDevType)) != AV_HWDEVICE_TYPE_NONE)
+            fprintf(stderr, " %s", av_hwdevice_get_type_name(mHWDevType));
+        fprintf(stderr, "\n");
+        return -1;
+    }
+
+    return 0;
+}
+
 int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
     int videoIndex = getVideoStreamIndex(ifmtCtx);
     mTimebase = ifmtCtx->streams[videoIndex]->time_base;
+
+    // 尝试初始化硬件配置
+    int card_id = OTL_GET_INT32_HIGH16(mId);
+    int vid = OTL_GET_INT32_LOW16(mId);
+    if (initHWConfig(card_id, vid) < 0) {
+        fprintf(stderr, "Hardware acceleration initialization failed.\n");
+        return -1;
+    }
 
 #if LIBAVCODEC_VERSION_MAJOR > 56
     auto codecId = ifmtCtx->streams[videoIndex]->codecpar->codec_id;
@@ -330,6 +410,26 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
         mDecCtx = nullptr;
     }
 
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(58, 18, 100)
+    for (int i = 0;; i++) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+        if (!config) {
+            fprintf(stderr, "Decoder %s does not support device type %s.\n", codec->name,
+                    av_hwdevice_get_type_name(mHWDevType));
+            return -1;
+        }
+
+        fprintf(stderr, "Decoder: %s, device type: %s.\n", codec->name,
+                av_hwdevice_get_type_name(mHWDevType));
+
+        if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == mHWDevType) {
+            mHwPixFmt = config->pix_fmt;
+            fprintf(stderr, "hw_pix_fmt %d\n", mHwPixFmt);
+            break;
+        }
+    }
+#endif
+
     mDecCtx = avcodec_alloc_context3(codec);
     if (mDecCtx == NULL) {
         printf("avcodec_alloc_context3 err");
@@ -355,27 +455,16 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
         mDecCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
     }
 #endif
-    // 是否支持硬件解码
-    mHWDevType = av_hwdevice_find_type_by_name(mszHWDevTypeName);
-    if (mHWDevType == AV_HWDEVICE_TYPE_NONE) {
-        fprintf(stderr, "Device type %s is not supported.\n", mszHWDevTypeName);
-        fprintf(stderr, "Available device types:");
-        while ((mHWDevType = av_hwdevice_iterate_types(mHWDevType)) != AV_HWDEVICE_TYPE_NONE)
-            fprintf(stderr, " %s", av_hwdevice_get_type_name(mHWDevType));
-        fprintf(stderr, "\n");
-        return -1;
-    }
 
     AVDictionary *opts = nullptr;
 
-    int card_id = OTL_GET_INT32_HIGH16(mId);
-    int vid = OTL_GET_INT32_LOW16(mId);;
     av_dict_set_int(&mOptsDecoder, "card_id", card_id, 0);
     av_dict_set_int(&mOptsDecoder, "vpu_id", vid, 0);
     av_dict_set(&mOptsDecoder, "output_pixfmt", "yuv420p", 0);
 
     char tmp[128];
     sprintf(tmp, "/dev/gcu%dvid%d", card_id, vid);
+    printf("create decoderID = %d, hwdevicectx %s\n", mId, tmp);
     av_dict_set(&opts, "dec", tmp, 0);
     av_dict_set(&opts, "enc", tmp, 0);
     sprintf(tmp, "/dev/gcu%d", card_id);
@@ -383,23 +472,23 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx) {
     av_dict_set(&opts, "mapped_io", "1", 0);
 
     if (av_hwdevice_ctx_create(&mHWDeviceCtx, mHWDevType, nullptr, opts, 0) < 0) {
-        fprintf(stderr, "av_hwdevice_ctx_create failed!\n");
-        return -1;
+        fprintf(stderr, "Hardware device context creation failed, falling back to software decoding.\n");
+        // 清除硬件相关设置，使用软解码
+        mHWDeviceCtx = nullptr;
+        mHwPixFmt = AV_PIX_FMT_NONE;
+        // 重新查找软解码器
+        codec = avcodec_find_decoder(codecId);
+        if (!codec) {
+            fprintf(stderr, "Failed to find decoder for codec id %d\n", codecId);
+            return -1;
+        }
     }
 
     mDecCtx->hw_device_ctx = av_buffer_ref(mHWDeviceCtx);
-    mDecCtx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat *pix_fmts)
-    {
-        const enum AVPixelFormat *p;
-        for (p = pix_fmts; *p != -1; p++) {
-            if (*p == gHWPixFormat)
-                return *p;
-        }
-        av_log(ctx, AV_LOG_ERROR, "Failed to get HW surface format.\n");
-        return AV_PIX_FMT_NONE;
-    };
+    mDecCtx->opaque = this;
+    mDecCtx->get_format = get_hw_format;
 
-    mDecCtx->pix_fmt = AV_PIX_FMT_BGR24; //可以直接指定。
+    mDecCtx->pix_fmt = AV_PIX_FMT_YUV420P; //可以直接指定。
 
     if ((ret = avcodec_open2(mDecCtx, codec, &mOptsDecoder)) < 0) {
         fprintf(stderr, "Failed to open %s codec\n",

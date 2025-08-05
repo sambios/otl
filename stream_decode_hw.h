@@ -52,11 +52,6 @@ protected:
     int mId{0};
     AVRational mTimebase;
 
-    //HWAccels
-    char mszHWDevTypeName[64];
-    enum AVHWDeviceType mHWDevType;
-    AVBufferRef *mHWDeviceCtx{nullptr};
-
     int createVideoDecoder(AVFormatContext *ifmtCtx);
     int putPacket(AVPacket *pkt);
     AVPacket *getPacket();
@@ -110,6 +105,13 @@ public:
     // External utilities
     static AVPacket* ffmpegPacketAlloc();
     static AVCodecContext* ffmpegCreateDecoder(enum AVCodecID id, AVDictionary **opts = nullptr);
+
+    //HWAccels
+    char mszHWDevTypeName[64];
+    enum AVHWDeviceType mHWDevType;
+    enum AVPixelFormat mHwPixFmt{AV_PIX_FMT_NONE};
+    AVBufferRef *mHWDeviceCtx{nullptr};
+
 };
 
 } // namespace otl

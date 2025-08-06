@@ -27,7 +27,7 @@ public:
 #endif
         avformat_network_init();
         avdevice_register_all();
-        av_log_set_level(AV_LOG_ERROR);
+        av_log_set_level(AV_LOG_VERBOSE);
     }
 
     virtual ~FfmpegGlobal() {

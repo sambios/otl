@@ -111,6 +111,7 @@ public:
     enum AVHWDeviceType mHWDevType;
     enum AVPixelFormat mHwPixFmt{AV_PIX_FMT_NONE};
     AVBufferRef *mHWDeviceCtx{nullptr};
+    char mszHWDecoderName[64];
 
 };
 

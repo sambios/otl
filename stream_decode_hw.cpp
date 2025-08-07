@@ -39,7 +39,7 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder) : mObserver(nullpt
     mOptsDecoder = nullptr;
     // device type
     // 只需要设置DeviceName, 程序自动设置mHwPixFmt值，避免编译问题。
-    strcpy(mszHWDevTypeName, "cuda");
+    strcpy(mszHWDevTypeName, "vsv");
     if (strcmp(mszHWDevTypeName, "vsv") == 0) // VSV HWAccel
     {
         strcpy(mszHWDevTypeName, "vsv");

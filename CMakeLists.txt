@@ -4,7 +4,7 @@ project(otl)
 
 set(CMAKE_CXX_STANDARD 14)
 
-option(USE_HW_CODEC "use hardware accelerator" OFF)
+option(USE_HW_CODEC "use hardware accelerator" ON)
 option(USE_TOPS_FFMPEG "use Tops ffmpeg" OFF)
 
 set(UTILITY_TOP ${CMAKE_CURRENT_SOURCE_DIR})

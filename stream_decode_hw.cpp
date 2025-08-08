@@ -2,6 +2,15 @@
 #include "otl.h"
 #include "stream_sei.h"
 
+extern "C" {
+ #include <libavfilter/avfilter.h>
+ #include <libavfilter/buffersrc.h>
+ #include <libavfilter/buffersink.h>
+ #include <libavutil/opt.h>
+ #include <libavutil/buffer.h>
+}
+#include <unistd.h>
+
 namespace otl
 {
 
@@ -39,14 +48,24 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder) : mObserver(nullpt
     mOptsDecoder = nullptr;
     // device type
     // 只需要设置DeviceName, 程序自动设置mHwPixFmt值，避免编译问题。
-    strcpy(mszHWDevTypeName, "vsv");
+    strcpy(mszHWDevTypeName, "cuda");
     if (strcmp(mszHWDevTypeName, "vsv") == 0) // VSV HWAccel
     {
         strcpy(mszHWDevTypeName, "vsv");
         strcpy(mszHWDecoderName, "h264_vsv_decoder");
-        std::string homedir= getenv("HOME");
-        std::string vcd_lib_dir = homedir + "/enrigin_sdk/opt/tops/lib/lib_vcd.so";
-        setenv("VCD_SHARED_LIB", vcd_lib_dir.c_str(), 1);
+
+        //1. first check /opt/tops/lib/lib_vcd.so
+        char* envVcdSo = getenv("VCD_SHARED_LIB");
+        if (envVcdSo == nullptr) {
+            std::string vcd_lib_dir = "/opt/tops/lib/lib_vcd.so";
+            if (access(vcd_lib_dir.c_str(), F_OK) == 0) {
+                setenv("VCD_SHARED_LIB", vcd_lib_dir.c_str(), 1);
+            }else {
+                std::string homedir= getenv("HOME");
+                vcd_lib_dir = homedir + "/enrigin_sdk/opt/tops/lib/lib_vcd.so";
+                setenv("VCD_SHARED_LIB", vcd_lib_dir.c_str(), 1);
+            }
+        }
     }
     else if (strcmp(mszHWDevTypeName, "cuda") == 0) // CUDA HWAccel
     {
@@ -57,6 +76,17 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder) : mObserver(nullpt
 StreamDecoder::~StreamDecoder()
 {
     std::cout << "~StreamDecoder() dtor..." << std::endl;
+
+    // release filter graph resources
+    if (mFilterGraph) {
+        avfilter_graph_free(&mFilterGraph);
+        mFilterGraph = nullptr;
+        mBuffersrcCtx = nullptr;
+        mBuffersinkCtx = nullptr;
+        mFilterInited = false;
+        mEnableFilter = false;
+        mFilterDesc.clear();
+    }
 
     // 释放硬件设备上下文
     if (mHWDeviceCtx)
@@ -98,32 +128,7 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame)
                 {
                     // 成功接收到一帧
                     gotPicture++;
-
-                    // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
-                    if (pFrame->format == mHwPixFmt)
-                    {
-                        AVFrame *sw_frame = av_frame_alloc();
-                        if (!sw_frame)
-                        {
-                            return AVERROR(ENOMEM);
-                        }
-
-                        // 从 GPU 内存转到 CPU 内存
-                        if ((receive_ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0)
-                        {
-                            av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
-                            av_frame_free(&sw_frame);
-                            return receive_ret;
-                        }
-
-                        // 复制时间戳等元数据
-                        av_frame_copy_props(sw_frame, pFrame);
-                        av_frame_unref(pFrame);
-
-                        // 将 sw_frame 数据复制回 pFrame
-                        av_frame_move_ref(pFrame, sw_frame);
-                        av_frame_free(&sw_frame);
-                    }
+                    // 不在此处下载硬件帧，尽量保持硬件加速
                 }
             } while (receive_ret >= 0);
 
@@ -168,30 +173,7 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame)
         gotPicture++;
 
         // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
-        if (pFrame->format == mHwPixFmt)
-        {
-            AVFrame *sw_frame = av_frame_alloc();
-            if (!sw_frame)
-            {
-                return AVERROR(ENOMEM);
-            }
-
-            // 从 GPU 内存转到 CPU 内存
-            if ((ret = av_hwframe_transfer_data(sw_frame, pFrame, 0)) < 0)
-            {
-                av_log(NULL, AV_LOG_ERROR, "Error transferring HW frame data to system memory\n");
-                av_frame_free(&sw_frame);
-                return ret;
-            }
-
-            // 复制时间戳等元数据
-            av_frame_copy_props(sw_frame, pFrame);
-            av_frame_unref(pFrame);
-
-            // 将 sw_frame 数据复制回 pFrame
-            av_frame_move_ref(pFrame, sw_frame);
-            av_frame_free(&sw_frame);
-        }
+        // 不再在 decode 阶段将硬件帧下载为系统内存帧，保留 HW 帧以尽量保持硬件加速。
 
         // 如果调用者期望只处理一帧，此处应该可以返回
         // 但为了支持一次解码多帧，我们继续处理直到需要更多数据
@@ -242,6 +224,14 @@ void StreamDecoder::onAvformatClosed()
 {
     clearPackets();
     std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
+    // free filter graph
+    if (mFilterGraph) {
+        avfilter_graph_free(&mFilterGraph);
+        mFilterGraph = nullptr;
+        mBuffersrcCtx = nullptr;
+        mBuffersinkCtx = nullptr;
+        mFilterInited = false;
+    }
     // 释放硬件设备上下文
     if (mHWDeviceCtx)
     {
@@ -373,19 +363,46 @@ int StreamDecoder::onReadFrame(AVPacket *pkt)
     if (ret > 0)
     {
         auto pktS = getPacket();
+        AVFrame *outFrame = frame;
+
+        // Lazy init filter graph when first frame arrives
+        if (mEnableFilter && !mFilterInited) {
+            if (initFilterGraphWithFrame(mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx, frame) == 0) {
+                mFilterInited = true;
+            } else {
+                fprintf(stderr, "initFilterGraphWithFrame failed, disable filtering.\n");
+                mEnableFilter = false;
+            }
+        }
+
+        // Apply filters if enabled
+        AVFrame *filtered = nullptr;
+        if (mEnableFilter && mFilterInited) {
+            filtered = av_frame_alloc();
+            int fr = applyFilters(frame, filtered);
+            if (fr == 0) {
+                outFrame = filtered;
+            } else {
+                av_frame_free(&filtered);
+            }
+        }
 
         if (mObserver)
         {
-            mObserver->onDecodedAVFrame(pktS, frame);
+            mObserver->onDecodedAVFrame(pktS, outFrame);
         }
 
         if (mOnDecodedFrameFunc != nullptr)
         {
-            mOnDecodedFrameFunc(pktS, frame);
+            mOnDecodedFrameFunc(pktS, outFrame);
         }
 
         av_packet_unref(pktS);
         av_freep(&pktS);
+
+        if (outFrame != frame) {
+            av_frame_free(&outFrame);
+        }
     }
 
     av_frame_unref(frame);
@@ -631,12 +648,12 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx)
     if (isHWConfigOK) {
         av_dict_set_int(&mOptsDecoder, "card_id", card_id, 0);
         av_dict_set_int(&mOptsDecoder, "vpu_id", vid, 0);
-        av_dict_set(&mOptsDecoder, "output_pixfmt", "yuv420p", 0);
+        // 不再强制输出像素格式为 yuv420p，允许保持硬件表面
 
         mDecCtx->hw_device_ctx = av_buffer_ref(mHWDeviceCtx);
         mDecCtx->opaque = this;
         mDecCtx->get_format = get_hw_format;
-        mDecCtx->pix_fmt = AV_PIX_FMT_YUV420P; // 可以直接指定。
+        // 不设置 mDecCtx->pix_fmt 为 SW 格式，交由解码器选择 HW 表面格式
     }
 
     if ((ret = avcodec_open2(mDecCtx, codec, &mOptsDecoder)) < 0)
@@ -657,6 +674,32 @@ int StreamDecoder::setObserver(StreamDecoderEvents *observer)
 int StreamDecoder::openStream(std::string url, bool repeat, AVDictionary *opts)
 {
     av_dict_copy(&mOptsDecoder, opts, 0);
+    // parse filter string from opts without changing external interface
+    AVDictionaryEntry *e = av_dict_get(mOptsDecoder, "filter", nullptr, 0);
+    if (!e) e = av_dict_get(mOptsDecoder, "vf", nullptr, 0);
+    if (e && e->value && e->value[0] != '\0') {
+        mFilterDesc = e->value;
+        mEnableFilter = true;
+        // reset any previous graph
+        if (mFilterGraph) {
+            avfilter_graph_free(&mFilterGraph);
+            mFilterGraph = nullptr;
+            mBuffersrcCtx = nullptr;
+            mBuffersinkCtx = nullptr;
+        }
+        mFilterInited = false;
+    } else {
+        mFilterDesc.clear();
+        mEnableFilter = false;
+        // also cleanup if previously existed
+        if (mFilterGraph) {
+            avfilter_graph_free(&mFilterGraph);
+            mFilterGraph = nullptr;
+            mBuffersrcCtx = nullptr;
+            mBuffersinkCtx = nullptr;
+        }
+        mFilterInited = false;
+    }
     return mDemuxer.openStream(url, this, repeat);
 }
 
@@ -755,3 +798,118 @@ bool StreamDecoder::isKeyFrame(AVPacket *pkt)
 }
 
 } // namespace otl
+
+// -------------------- Internal helpers: filter graph --------------------
+namespace otl {
+int StreamDecoder::initFilterGraphWithFrame(AVCodecContext *decCtx, const AVFrame *sampleFrame)
+{
+    if (!mEnableFilter || mFilterDesc.empty()) return -1;
+
+    int ret = 0;
+    char args[512];
+    AVFilterInOut *inputs = nullptr;
+    AVFilterInOut *outputs = nullptr;
+    const AVFilter *buffersrc = avfilter_get_by_name("buffer");
+    const AVFilter *buffersink = avfilter_get_by_name("buffersink");
+
+    if (!buffersrc || !buffersink) return AVERROR_FILTER_NOT_FOUND;
+
+    mFilterGraph = avfilter_graph_alloc();
+    if (!mFilterGraph) return AVERROR(ENOMEM);
+
+    // Note: Do not call avfilter_graph_set_device for compatibility with older FFmpeg.
+    // HW context will be propagated via buffersrc hw_frames_ctx when available.
+
+    AVRational tb = mTimebase.num ? mTimebase : av_make_q(1, 25);
+    AVRational sar = sampleFrame->sample_aspect_ratio.num ? sampleFrame->sample_aspect_ratio : av_make_q(1,1);
+
+    snprintf(args, sizeof(args),
+             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+             sampleFrame->width, sampleFrame->height, sampleFrame->format,
+             tb.num, tb.den, sar.num, sar.den);
+
+    if ((ret = avfilter_graph_create_filter(&mBuffersrcCtx, buffersrc, "in", args, nullptr, mFilterGraph)) < 0) {
+        print_ffmpeg_error(ret);
+        goto fail;
+    }
+
+    if ((ret = avfilter_graph_create_filter(&mBuffersinkCtx, buffersink, "out", nullptr, nullptr, mFilterGraph)) < 0) {
+        print_ffmpeg_error(ret);
+        goto fail;
+    }
+
+    // If sample frame is a HW frame, propagate its hw_frames_ctx to buffersrc
+    if (sampleFrame->hw_frames_ctx) {
+        AVBufferRef *hwf = av_buffer_ref(sampleFrame->hw_frames_ctx);
+        if (hwf) {
+            AVBufferSrcParameters *par = av_buffersrc_parameters_alloc();
+            if (!par) { ret = AVERROR(ENOMEM); goto fail; }
+            memset(par, 0, sizeof(*par));
+            par->format = sampleFrame->format;
+            par->time_base = tb;
+            par->hw_frames_ctx = hwf;
+            par->width = sampleFrame->width;
+            par->height = sampleFrame->height;
+            ret = av_buffersrc_parameters_set(mBuffersrcCtx, par);
+            av_freep(&par);
+            if (ret < 0) {
+                print_ffmpeg_error(ret);
+                goto fail;
+            }
+        }
+    }
+
+    outputs = avfilter_inout_alloc();
+    inputs  = avfilter_inout_alloc();
+    if (!outputs || !inputs) { ret = AVERROR(ENOMEM); goto fail; }
+
+    outputs->name       = av_strdup("in");
+    outputs->filter_ctx = mBuffersrcCtx;
+    outputs->pad_idx    = 0;
+    outputs->next       = nullptr;
+
+    inputs->name        = av_strdup("out");
+    inputs->filter_ctx  = mBuffersinkCtx;
+    inputs->pad_idx     = 0;
+    inputs->next        = nullptr;
+
+    if ((ret = avfilter_graph_parse_ptr(mFilterGraph, mFilterDesc.c_str(), &inputs, &outputs, nullptr)) < 0) {
+        print_ffmpeg_error(ret);
+        goto fail;
+    }
+
+    if ((ret = avfilter_graph_config(mFilterGraph, nullptr)) < 0) {
+        print_ffmpeg_error(ret);
+        goto fail;
+    }
+
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
+    return 0;
+
+fail:
+    if (inputs) avfilter_inout_free(&inputs);
+    if (outputs) avfilter_inout_free(&outputs);
+    if (mFilterGraph) {
+        avfilter_graph_free(&mFilterGraph);
+        mBuffersrcCtx = nullptr;
+        mBuffersinkCtx = nullptr;
+    }
+    return ret < 0 ? ret : -1;
+}
+
+int StreamDecoder::applyFilters(AVFrame *in, AVFrame *out)
+{
+    if (!mFilterGraph || !mBuffersrcCtx || !mBuffersinkCtx) return -1;
+    int ret = av_buffersrc_add_frame_flags(mBuffersrcCtx, in, AV_BUFFERSRC_FLAG_KEEP_REF);
+    if (ret < 0) { print_ffmpeg_error(ret); return ret; }
+
+    // Try to get one filtered frame
+    ret = av_buffersink_get_frame(mBuffersinkCtx, out);
+    if (ret < 0) {
+        if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) print_ffmpeg_error(ret);
+        return ret;
+    }
+    return 0;
+}
+}

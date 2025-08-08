@@ -3,6 +3,11 @@
 #define STREAM_DECODE_HW_H
 
 #include "stream_demuxer.h"
+#include <string>
+
+// forward declarations to avoid exposing libavfilter headers here
+struct AVFilterGraph;
+struct AVFilterContext;
 
 namespace otl {
 
@@ -61,6 +66,17 @@ protected:
     bool isKeyFrame(AVPacket *pkt);
 
     int initHWConfig(int devId, int vpuId);
+
+    // ----- Internal HW-aware filter pipeline (enabled by opts key "filter" or "vf") -----
+    // Lazy-initialized on first decoded frame to capture correct frame/hw contexts.
+    AVFilterGraph *mFilterGraph{nullptr};
+    AVFilterContext *mBuffersrcCtx{nullptr};
+    AVFilterContext *mBuffersinkCtx{nullptr};
+    std::string mFilterDesc;       // user-provided filter string
+    bool mEnableFilter{false};     // whether filtering requested
+    bool mFilterInited{false};     // whether graph initialized successfully
+    int initFilterGraphWithFrame(AVCodecContext *decCtx, const AVFrame *sampleFrame);
+    int applyFilters(AVFrame *in, AVFrame *out);
 
     // Overload StreamDemuxerEvents Interface.
     virtual void onAvformatOpened(AVFormatContext *ifmtCtx) override;

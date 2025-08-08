@@ -18,6 +18,10 @@
 
 #include <sys/time.h>
 
+#ifdef __linux__
+#include <unistd.h>
+#endif
+
 // 检测编译器是否支持C++17的std::filesystem
 #if __cplusplus >= 201703L
     #if defined(__GNUC__) && __GNUC__ < 9

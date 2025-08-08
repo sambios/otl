@@ -1,11 +1,4 @@
-//===----------------------------------------------------------------------===//
-//
-// Copyright (C) 2022 Sophgo Technologies Inc.  All rights reserved.
-//
-// SOPHON-PIPELINE is licensed under the 2-Clause BSD License except for the
-// third-party components.
-//
-//===----------------------------------------------------------------------===//
+
 
 #ifndef OTL_STRING_H
 #define OTL_STRING_H

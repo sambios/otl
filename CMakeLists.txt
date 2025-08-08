@@ -24,9 +24,9 @@ if (NOT USE_TOPS_FFMPEG)
     set(FFMPEG_LINK_LIBS PkgConfig::FFMPEG)
 
 else()
-    set(FFMPEG_INCLUDE_DIRS /home/jovyan/buildroot/include)
-    set(FFMPEG_LINK_DIRS /opt/tops/lib)
-    set(FFMPEG_LINK_LIBS avcodec avformat avfilter avutil swscale avdevice)
+    set(FFMPEG_INCLUDE_DIRS $ENV{HOME}/buildroot/include)
+    set(FFMPEG_LINK_DIRS /opt/tops/lib $ENV{HOME}/enrigin_sdk/opt/tops/lib)
+    set(FFMPEG_LINK_LIBS avcodec avformat avfilter avutil swscale swresample avdevice)
 endif()
 
 
@@ -41,6 +41,7 @@ else()
 endif()
 
 add_library(otl stream_sei.cpp
+        otl_baseclass.cpp
         stream_demuxer.cpp
         otl_timer.cpp
         otl_string.cpp

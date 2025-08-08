@@ -19,6 +19,7 @@ namespace otl {
     public:
         virtual ~DetectorDelegate() {}
 
+        virtual int initialize() = 0;
         virtual int preprocess(std::vector<T1> &frames) = 0;
 
         virtual int forward(std::vector<T1> &frames) = 0;
@@ -52,6 +53,9 @@ namespace otl {
         int postprocess_thread_num;
         int batch_num;
 
+        std::function<void()> first_pre_forward;
+
+
     };
 
     template<typename T1>
@@ -66,7 +70,6 @@ namespace otl {
         WorkerPool<T1> m_preprocessWorkerPool;
         WorkerPool<T1> m_forwardWorkerPool;
         WorkerPool<T1> m_postprocessWorkerPool;
-
 
     public:
         InferencePipe() {
@@ -102,6 +105,10 @@ namespace otl {
             m_forwardWorkerPool.startWork([this, &param](std::vector<T1> &items) {
                 m_detect_delegate->forward(items);
                 this->m_postprocessQue->push(items);
+            },
+            [this]() // Initialize Function
+            {
+                m_detect_delegate->initialize();
             });
 
             m_postprocessWorkerPool.init(m_postprocessQue.get(), param.postprocess_thread_num, 1, 8);
@@ -120,6 +127,8 @@ namespace otl {
             m_preprocessQue->push(*frame);
             return 0;
         }
+
+
     };
 } // namespace otl
 

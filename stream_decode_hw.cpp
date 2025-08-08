@@ -44,6 +44,9 @@ StreamDecoder::StreamDecoder(int id, AVCodecContext *decoder) : mObserver(nullpt
     {
         strcpy(mszHWDevTypeName, "vsv");
         strcpy(mszHWDecoderName, "h264_vsv_decoder");
+        std::string homedir= getenv("HOME");
+        std::string vcd_lib_dir = homedir + "/enrigin_sdk/opt/tops/lib/lib_vcd.so";
+        setenv("VCD_SHARED_LIB", vcd_lib_dir.c_str(), 1);
     }
     else if (strcmp(mszHWDevTypeName, "cuda") == 0) // CUDA HWAccel
     {
@@ -192,6 +195,7 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame)
 
         // 如果调用者期望只处理一帧，此处应该可以返回
         // 但为了支持一次解码多帧，我们继续处理直到需要更多数据
+        break;
     }
 
     return gotPicture;

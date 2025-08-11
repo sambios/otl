@@ -279,68 +279,41 @@ int StreamDecoder::onReadFrame(AVPacket *pkt)
     {
         std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
         int seiLen = 0;
+        // Always try to read SEI; h264SeiPacketRead supports Annex B and AVCC
+        seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
 
-        if (pkt->data && 0 == pkt->data[0] && 0 == pkt->data[1] && 0 == pkt->data[2] && 1 == pkt->data[3])
+        if (seiLen > 0)
         {
-            // seiLen = h264_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
-            seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
-        }
+            if (mObserver != nullptr) {
+                mObserver->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
+            }
 
-        if (seiLen > 0 && mOnDecodedSeiFunc)
-        {
-            mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
+            if (mOnDecodedSeiFunc) {
+                mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
+            }
         }
     }
     else if (decCtx->codec_id == AV_CODEC_ID_H265)
     {
         std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
         int seiLen = 0;
-
-        if (pkt->data && 0 == pkt->data[0] && 0 == pkt->data[1] && 0 == pkt->data[2] && 1 == pkt->data[3])
+        // Always try to read SEI; h265SeiPacketRead supports Annex B and AVCC
+        seiLen = h265SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
+        if (seiLen > 0)
         {
-            // seiLen = h265_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
-            seiLen = h265SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
-            int nalType = 0;
-            if (0 == pkt->data[0] && 0 == pkt->data[1] && 0 == pkt->data[2] && 1 == pkt->data[3])
+            if (mObserver != nullptr)
             {
-                nalType = (pkt->data[4] & 0x7E) >> 1;
-            }
-            else if (0 == pkt->data[0] && 0 == pkt->data[1] && 1 == pkt->data[2])
-            {
-                nalType = (pkt->data[3] & 0x7E) >> 1;
+                mObserver->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
             }
 
-            if (nalType == 39)
+            if (mOnDecodedSeiFunc != nullptr)
             {
-                if (mObserver != nullptr || mOnDecodedSeiFunc != nullptr)
-                {
-                    std::unique_ptr<uint8_t[]> seiBufPtr(new uint8_t[pkt->size]);
-                    int seiLen = 0;
-
-                    if (pkt->data && 0 == pkt->data[0] && 0 == pkt->data[1] && 0 == pkt->data[2] && 1 == pkt->data[3])
-                    {
-                        // seiLen = h264_read_sei_rbsp(pkt->data + 4, pkt->size - 4, seiBufPtr.get(), pkt->size);
-                        seiLen = h264SeiPacketRead(pkt->data, pkt->size, seiBufPtr.get(), pkt->size);
-                    }
-
-                    if (seiLen > 0)
-                    {
-                        if (mObserver != nullptr)
-                        {
-                            mObserver->onDecodedSeiInfo(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
-                        }
-
-                        if (mOnDecodedSeiFunc != nullptr)
-                        {
-                            mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
-                        }
-                    }
-                }
+                mOnDecodedSeiFunc(seiBufPtr.get(), seiLen, pkt->pts, pkt->pos);
             }
         }
     }
 
-    // std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
+    //std::cout << __FUNCTION__ << ":" << __LINE__ << std::endl;
     AVFrame *frame = av_frame_alloc();
     ret = decodeFrame(pkt, frame);
     if (ret < 0)
@@ -760,41 +733,94 @@ AVCodecContext *StreamDecoder::ffmpegCreateDecoder(enum AVCodecID codecId, AVDic
 bool StreamDecoder::isKeyFrame(AVPacket *pkt)
 {
     auto decCtx = mExternalDecCtx != nullptr ? mExternalDecCtx : mDecCtx;
-    if (decCtx == nullptr)
+    if (!decCtx || !pkt || !pkt->data || pkt->size <= 0) return false;
+
+    const uint8_t *data = pkt->data;
+    int size = pkt->size;
+
+    auto has_start_code = [&](const uint8_t *p, int n) -> bool {
+        if (n >= 3 && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0x01) return true;
+        if (n >= 4 && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0x00 && p[3] == 0x01) return true;
         return false;
-    if (decCtx->codec_id == AV_CODEC_ID_H264)
-    {
-        if (pkt == nullptr || pkt->data == nullptr)
-            return false;
-        int nalType = pkt->data[4] & 0x1f;
-        if (nalType != 7)
-        {
-            uint8_t *p = &pkt->data[0];
-            uint8_t *end = &pkt->data[pkt->size];
-            p += 4;
-            while (p != end)
-            {
-                if (p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1)
-                {
-                    nalType = p[4] & 0x1f;
-                    break;
-                }
-                p++;
+    };
+
+    auto parse_annexb = [&](auto &&on_nalu) {
+        const uint8_t *p = data;
+        const uint8_t *end = data + size;
+        // find first start code
+        while (p + 3 < end && !has_start_code(p, end - p)) p++;
+        while (p + 3 < end) {
+            // skip start code
+            int sc = (p[2] == 0x01) ? 3 : 4;
+            if (!has_start_code(p, end - p)) break;
+            p += sc;
+            if (p >= end) break;
+            const uint8_t *nalu_start = p;
+            // find next start code to get nalu_end
+            const uint8_t *q = p;
+            while (q + 3 < end && !has_start_code(q, end - q)) q++;
+            const uint8_t *nalu_end = q;
+            if (nalu_end > nalu_start) {
+                on_nalu(nalu_start, (int)(nalu_end - nalu_start));
             }
+            p = q;
         }
-        if (nalType == 7 || nalType == 5)
-        {
-            return true;
+    };
+
+    auto parse_avcc = [&](int nalu_hdr_bytes, auto &&on_nalu) {
+        const uint8_t *p = data;
+        const uint8_t *end = data + size;
+        while (p + 4 <= end) {
+            uint32_t beLen = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | (p[3]);
+            p += 4;
+            if (beLen == 0 || p + beLen > end) break;
+            if ((int)beLen > nalu_hdr_bytes) {
+                on_nalu(p, (int)beLen);
+            }
+            p += beLen;
         }
-        else
-        {
-            return false;
+    };
+
+    bool foundKey = false;
+    if (decCtx->codec_id == AV_CODEC_ID_H264) {
+        auto on_h264 = [&](const uint8_t *nalu, int n) {
+            if (n < 1) return;
+            uint8_t nalType = nalu[0] & 0x1F;
+            // Skip SEI/SPS/PPS for keyframe decision
+            if (nalType == 6 || nalType == 7 || nalType == 8) return;
+            if (nalType == 5) { // IDR
+                foundKey = true;
+            }
+        };
+        if (has_start_code(data, size)) {
+            parse_annexb(on_h264);
+        } else {
+            // assume 4-byte length prefix AVCC
+            parse_avcc(1, on_h264);
         }
+    } else if (decCtx->codec_id == AV_CODEC_ID_H265) {
+        auto on_h265 = [&](const uint8_t *nalu, int n) {
+            if (n < 2) return;
+            uint8_t nalUnitType = (nalu[0] >> 1) & 0x3F;
+            // Skip SEI prefix/suffix
+            if (nalUnitType == 39 || nalUnitType == 40) return;
+            // Treat IDR_W_RADL(19), IDR_N_LP(20), CRA(21) as keyframes for access-point frames
+            if (nalUnitType == 19 || nalUnitType == 20 || nalUnitType == 21) {
+                foundKey = true;
+            }
+        };
+        if (has_start_code(data, size)) {
+            parse_annexb(on_h265);
+        } else {
+            // assume 4-byte length prefix HVCC
+            parse_avcc(2, on_h265);
+        }
+    } else {
+        // For other codecs, fallback to packet flag if available
+        foundKey = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
     }
-    else
-    {
-        return true;
-    }
+
+    return foundKey;
 }
 
 } // namespace otl

@@ -11,7 +11,9 @@ extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavutil/avutil.h"
 #include "libavformat/avformat.h"
+#include "libswscale/swscale.h"
 #include "libavutil/time.h"
+#include "libavutil/imgutils.h"
 }
 #endif
 

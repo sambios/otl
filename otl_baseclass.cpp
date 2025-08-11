@@ -5,58 +5,50 @@
 
 namespace otl
 {
-    bool ByteBuffer::check_buffer(int len)
+    bool ByteBuffer::check_buffer(size_t len)
     {
-        if (m_back_offset + len > m_size)
+        size_t need = static_cast<size_t>(m_back_offset) + len;
+        if (need > m_size)
         {
-            char* pNew = nullptr;
-            pNew = (char*)realloc(m_bytes, m_size + 1024);
-            assert(pNew != nullptr);
-            if (pNew == nullptr)
-            {
-                return false;
-            }
-            else
-            {
-                m_bytes = pNew;
-                m_size += 1024;
-            }
+            // grow capacity with exponential strategy
+            size_t newCap = m_size ? m_size : 1024;
+            while (newCap < need) newCap *= 2;
+            void* pNew = realloc(m_bytes, newCap);
+            if (!pNew) return false;
+            m_bytes = static_cast<char*>(pNew);
+            m_size = newCap;
         }
 
         return true;
     }
 
-    bool ByteBuffer::check_buffer2(int len)
+    bool ByteBuffer::check_underflow(size_t len)
     {
-        if (m_back_offset - len < 0)
-        {
-            return false;
-        }
-
-        return true;
+        // ensure we have at least 'len' bytes available from back
+        return (len <= static_cast<size_t>(m_back_offset));
     }
 
-    int ByteBuffer::push_internal(int8_t* p, int len)
+    int ByteBuffer::push_internal(const void* p, size_t len)
     {
         if (!check_buffer(len)) return -1;
-        memcpy((uint8_t*)m_bytes + m_back_offset, p, len);
-        m_back_offset += len;
+        memcpy(m_bytes + m_back_offset, p, len);
+        m_back_offset += static_cast<int>(len);
         return 0;
     }
 
-    int ByteBuffer::pop_internal(int8_t* p, int len)
+    int ByteBuffer::pop_internal(void* p, size_t len)
     {
-        if (check_buffer2(len) != 0) return -1;
-        memcpy(p, &m_bytes[m_back_offset], len);
-        m_back_offset -= len;
+        if (!check_underflow(len)) return -1;
+        m_back_offset -= static_cast<int>(len);
+        memcpy(p, m_bytes + m_back_offset, len);
         return 0;
     }
 
-    int ByteBuffer::pop_front_internal(int8_t* p, int len)
+    int ByteBuffer::pop_front_internal(void* p, size_t len)
     {
-        if (m_front_offset + len > m_back_offset) return -1;
-        memcpy(p, &m_bytes[m_front_offset], len);
-        m_front_offset += len;
+        if (static_cast<size_t>(m_back_offset - m_front_offset) < len) return -1;
+        memcpy(p, m_bytes + m_front_offset, len);
+        m_front_offset += static_cast<int>(len);
         return 0;
     }
 
@@ -70,19 +62,12 @@ namespace otl
         return (((uint64_t)ntohl(val)) << 32) + ntohl(val >> 32);
     }
 
-    std::function<void(void*)> m_freeFunc;
-
-    ByteBuffer::ByteBuffer(size_t size): m_size(size)
+    ByteBuffer::ByteBuffer(size_t size): m_bytes(nullptr), m_back_offset(0), m_front_offset(0), m_size(size)
     {
-        m_bytes = new char[size];
+        if (m_size == 0) m_size = 1024;
+        m_bytes = static_cast<char*>(malloc(m_size));
         assert(m_bytes != nullptr);
-        m_front_offset = 0;
-        m_back_offset = 0;
-
-        m_freeFunc = [this](void* p)
-        {
-            delete [] m_bytes;
-        };
+        m_freeFunc = [](void* p) { free(p); };
     }
 
     ByteBuffer::ByteBuffer(char* buf, int size, std::function<void(void*)> free_func)
@@ -93,6 +78,27 @@ namespace otl
         m_size = size;
         m_freeFunc = free_func;
     }
+
+    ByteBuffer::ByteBuffer(const char* buf, size_t size)
+        : m_bytes(nullptr), m_back_offset(0), m_front_offset(0), m_size(0)
+    {
+        if (size == 0) {
+            m_bytes = nullptr;
+            m_size = 0;
+            m_freeFunc = [](void* p) { if (p) free(p); };
+            return;
+        }
+        m_size = size;
+        m_bytes = static_cast<char*>(malloc(m_size));
+        assert(m_bytes != nullptr);
+        memcpy(m_bytes, buf, size);
+        m_back_offset = static_cast<int>(size);
+        m_freeFunc = [](void* p) { if (p) free(p); };
+    }
+
+    ByteBuffer::ByteBuffer(const std::string& s)
+        : ByteBuffer(s.data(), s.size())
+    {}
 
     ByteBuffer::~ByteBuffer()
     {
@@ -107,14 +113,13 @@ namespace otl
 
     int ByteBuffer::push_back(uint8_t b)
     {
-        return push_internal((int8_t*)&b, sizeof(b));
+        return push_internal(&b, sizeof(b));
     }
 
     int ByteBuffer::push_back(int16_t b)
     {
         b = htons(b);
-        int8_t* p = (int8_t*)&b;
-        return push_internal(p, sizeof(b));
+        return push_internal(&b, sizeof(b));
     }
 
     int ByteBuffer::push_back(uint16_t b)
@@ -154,14 +159,12 @@ namespace otl
 
     int ByteBuffer::push_back(float f)
     {
-        int8_t* p = (int8_t*)&f;
-        return push_internal(p, sizeof(f));
+        return push_internal(&f, sizeof(f));
     }
 
     int ByteBuffer::push_back(double d)
     {
-        int8_t* p = (int8_t*)&d;
-        return push_internal(p, sizeof(d));
+        return push_internal(&d, sizeof(d));
     }
 
     int ByteBuffer::pop(int8_t& val)
@@ -172,7 +175,7 @@ namespace otl
     int ByteBuffer::pop(int16_t& val)
     {
         int16_t t;
-        if (pop_internal((int8_t*)&t, sizeof(val)) != 0)
+        if (pop_internal(&t, sizeof(val)) != 0)
         {
             return -1;
         }
@@ -207,7 +210,7 @@ namespace otl
 
     int ByteBuffer::pop(uint8_t& val)
     {
-        return pop_internal((int8_t*)&val, sizeof(val));
+        return pop_internal(&val, sizeof(val));
     }
 
     int ByteBuffer::pop(uint16_t& val)
@@ -264,7 +267,7 @@ namespace otl
     int ByteBuffer::pop_front(int16_t& val)
     {
         int16_t t;
-        if (pop_front_internal((int8_t*)&t, sizeof(val)) != 0)
+        if (pop_front_internal(&t, sizeof(val)) != 0)
         {
             return -1;
         }
@@ -299,7 +302,7 @@ namespace otl
 
     int ByteBuffer::pop_front(uint8_t& val)
     {
-        return pop_front_internal((int8_t*)&val, sizeof(val));
+        return pop_front_internal(&val, sizeof(val));
     }
 
     int ByteBuffer::pop_front(uint16_t& val)

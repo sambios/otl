@@ -48,7 +48,7 @@ namespace otl {
         return ext;
     }
 
-    std::string format(const char *pszFmt, ...)
+    std::string formatString(const char *pszFmt, ...)
     {
         std::string str;
         va_list args, args2;

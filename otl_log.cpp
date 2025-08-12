@@ -305,6 +305,73 @@ void log_worker() {
 
 } // anonymous namespace
 
+// Logger initialization from CLI arguments (only logging-related flags are handled)
+void init(int argc, char* argv[]) {
+    LogConfig cfg; // defaults
+
+    auto has_prefix = [](const std::string& s, const std::string& p) {
+        return s.compare(0, p.size(), p) == 0;
+    };
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i] ? argv[i] : "";
+        if (arg == "--log-level" && i + 1 < argc) {
+            cfg.level = LogLevelFromString(argv[++i]);
+        } else if (has_prefix(arg, "--log-level=")) {
+            cfg.level = LogLevelFromString(arg.substr(strlen("--log-level=")));
+        } else if (arg == "--log-file" && i + 1 < argc) {
+            cfg.fileConfig.path = argv[++i];
+            cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::File));
+        } else if (has_prefix(arg, "--log-file=")) {
+            cfg.fileConfig.path = arg.substr(strlen("--log-file="));
+            cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::File));
+        } else if (arg == "--log-console" && i + 1 < argc) {
+            int v = std::atoi(argv[++i]);
+            cfg.enableConsole = (v != 0);
+            if (cfg.enableConsole) {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Console));
+            } else {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) & ~static_cast<uint32_t>(OutputTarget::Console));
+            }
+        } else if (has_prefix(arg, "--log-console=")) {
+            int v = std::atoi(arg.substr(strlen("--log-console=")).c_str());
+            cfg.enableConsole = (v != 0);
+            if (cfg.enableConsole) {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Console));
+            } else {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) & ~static_cast<uint32_t>(OutputTarget::Console));
+            }
+        } else if (arg == "--log-telnet" && i + 1 < argc) {
+            int v = std::atoi(argv[++i]);
+            cfg.telnetConfig.enable = (v != 0);
+            if (cfg.telnetConfig.enable) {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Telnet));
+            } else {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) & ~static_cast<uint32_t>(OutputTarget::Telnet));
+            }
+        } else if (has_prefix(arg, "--log-telnet=")) {
+            int v = std::atoi(arg.substr(strlen("--log-telnet=")).c_str());
+            cfg.telnetConfig.enable = (v != 0);
+            if (cfg.telnetConfig.enable) {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Telnet));
+            } else {
+                cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) & ~static_cast<uint32_t>(OutputTarget::Telnet));
+            }
+        } else if (arg == "--log-telnet-port" && i + 1 < argc) {
+            cfg.telnetConfig.port = static_cast<uint16_t>(std::atoi(argv[++i]));
+            cfg.telnetConfig.enable = true;
+            cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Telnet));
+        } else if (has_prefix(arg, "--log-telnet-port=")) {
+            cfg.telnetConfig.port = static_cast<uint16_t>(std::atoi(arg.substr(strlen("--log-telnet-port=")).c_str()));
+            cfg.telnetConfig.enable = true;
+            cfg.targets = static_cast<OutputTarget>(static_cast<uint32_t>(cfg.targets) | static_cast<uint32_t>(OutputTarget::Telnet));
+        }
+        // ignore other args
+    }
+
+    init(cfg);
+}
+
 // Logger initialization
 void init(const LogConfig& config) {
     deinit();
@@ -528,6 +595,16 @@ void updateConfig(const LogConfig& config) {
 
 LogConfig getConfig() {
     return g_logger.config;
+}
+
+void setLevel(LogLevel level) {
+    g_logger.config.level = level;
+    // Apply dynamically to worker/output paths
+    updateConfig(g_logger.config);
+}
+
+LogLevel getLevel() {
+    return g_logger.config.level;
 }
 
 LogStream::LogStream(const char* file, int line, LogLevel level, const std::string& moduleTag)

@@ -483,14 +483,16 @@ int StreamDecoder::initHWConfig(int devId, int vpuId)
 
     AVDictionary *opts = nullptr;
 
-    char tmp[128];
-    sprintf(tmp, "/dev/gcu%dvid%d", devId, vpuId);
-    printf("create decoderID = %d, hwdevicectx %s\n", mId, tmp);
-    av_dict_set(&opts, "dec", tmp, 0);
-    av_dict_set(&opts, "enc", tmp, 0);
-    sprintf(tmp, "/dev/gcu%d", devId);
-    av_dict_set(&opts, "mem", tmp, 0);
-    av_dict_set(&opts, "mapped_io", "1", 0);
+    if (strcmp(mszHWDevTypeName, "vsv") == 0) {
+        char tmp[128];
+        sprintf(tmp, "/dev/gcu%dvid%d", devId, vpuId);
+        printf("create decoderID = %d, hwdevicectx %s\n", mId, tmp);
+        av_dict_set(&opts, "dec", tmp, 0);
+        av_dict_set(&opts, "enc", tmp, 0);
+        sprintf(tmp, "/dev/gcu%d", devId);
+        av_dict_set(&opts, "mem", tmp, 0);
+        av_dict_set(&opts, "mapped_io", "1", 0);
+    }
 
     if (av_hwdevice_ctx_create(&mHWDeviceCtx, mHWDevType, nullptr, opts, 0) < 0)
     {

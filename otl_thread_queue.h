@@ -5,8 +5,12 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <deque>
 #include <functional>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 #if  defined(__linux__) || defined(__APPLE__)
 
@@ -16,6 +20,7 @@
 
 #include <pthread.h>
 #include "otl_baseclass.h"
+#include "otl_log.h"
 
 namespace otl
 {
@@ -35,15 +40,14 @@ namespace otl
             if (m_limit > 0 && this->size_impl() >= m_limit && !m_stop)
             {
 # if USE_DEBUG
-            std::cout << "WARNING: " << m_name << " queue_size(" << this->size_impl() << ") > "
-                      << m_limit << std::endl;
+            OTL_LOGW(m_name.c_str(), "queue_size(%zu) > %d", this->size_impl(), m_limit);
 # endif
                 // flow control by dropping
                 if (m_drop_fn != nullptr)
                 {
                     this->drop_half_();
 # if USE_DEBUG
-                std::cout << m_name << " queue_size after dropping, size: " << this->size_impl() << std::endl;
+                OTL_LOGW(m_name.c_str(), "queue_size after dropping, size: %zu", this->size_impl());
 # endif
                 }
                 else
@@ -58,7 +62,7 @@ namespace otl
             }
             else if (this->size_impl() >= m_warning && !m_stop && this->size_impl() % 100 == 0)
             {
-                std::cout << "WARNING: " << m_name << " queue_size is " << this->size_impl() << std::endl;
+                OTL_LOGW(m_name.c_str(), "queue_size is %zu", this->size_impl());
             }
 
             if (m_type == 0)
@@ -85,7 +89,7 @@ namespace otl
         ~BlockingQueue()
         {
             pthread_mutex_lock(&m_qmtx);
-            std::cout << "destroy " << m_name << ",size:" << m_queue.size() + m_vec.size() << std::endl;
+            OTL_LOGI(m_name.c_str(), "destroy, size: %zu", m_queue.size() + m_vec.size());
             m_vec.clear();
             std::queue<T> empty;
             m_queue.swap(empty);
@@ -96,7 +100,7 @@ namespace otl
         {
             pthread_mutex_lock(&m_qmtx);
             m_stop = true;
-            std::cout << "stop blocking queue:" << m_name << std::endl;
+            OTL_LOGI(m_name.c_str(), "stop blocking queue");
             pthread_cond_broadcast(&m_push_condv);
             pthread_cond_broadcast(&m_pop_condv);
             pthread_mutex_unlock(&m_qmtx);
@@ -157,6 +161,7 @@ namespace otl
                 to.tv_nsec = nsec % 1000000000; //(now.tv_usec + wait_ms * 1000UL) * 1000UL;
             }
             pthread_mutex_lock(&m_qmtx);
+            if (p_is_timeout) *p_is_timeout = false;
             while ((m_type ? m_vec.size() < min_num : m_queue.size() < min_num) && !m_stop)
             {
 #ifdef BLOCKING_QUEUE_PERF
@@ -186,18 +191,18 @@ namespace otl
                     {
                         auto o = std::move(m_queue.front());
                         m_queue.pop();
-                        objs.push_back(o);
+                        objs.push_back(std::move(o));
                         oc++;
                     }
                 }
                 else
                 {
                     int oc = 0;
-                    while (oc < max_num && m_vec.size() > 0)
+                    while (oc < max_num && !m_vec.empty())
                     {
-                        auto o = std::move(m_vec[0]);
-                        m_vec.erase(m_vec.begin());
-                        objs.push_back(o);
+                        auto o = std::move(m_vec.front());
+                        m_vec.pop_front();
+                        objs.push_back(std::move(o));
                         oc++;
                     }
                 }
@@ -213,7 +218,7 @@ namespace otl
 
             if (is_timeout)
             {
-                *p_is_timeout = true;
+                if (p_is_timeout) *p_is_timeout = true;
                 return -1;
             }
 
@@ -243,32 +248,27 @@ namespace otl
                 size_t num = m_queue.size();
                 for (size_t i = 0; i < num; i++)
                 {
-                    auto elem = m_queue.front();
-                    if (i % 2 == 0)
-                    {
-                        temp.push(elem);
-                    }
-                    else
-                    {
+                    auto elem = std::move(m_queue.front());
+                    m_queue.pop();
+                    if ((i % 2) == 0) {
+                        temp.push(std::move(elem));
+                    } else if (m_drop_fn) {
                         m_drop_fn(elem);
                     }
-                    m_queue.pop();
                 }
                 m_queue.swap(temp);
             }
             else
             {
-                std::vector<T> temp;
+                std::deque<T> temp;
                 size_t num = m_vec.size();
                 for (size_t i = 0; i < num; i++)
                 {
-                    auto elem = m_vec[i];
-                    if (i % 2 == 0)
-                    {
-                        temp.push_back(elem);
-                    }
-                    else
-                    {
+                    auto elem = std::move(m_vec.front());
+                    m_vec.pop_front();
+                    if ((i % 2) == 0) {
+                        temp.push_back(std::move(elem));
+                    } else if (m_drop_fn) {
                         m_drop_fn(elem);
                     }
                 }
@@ -284,8 +284,10 @@ namespace otl
             {
                 num = this->size_impl();
             }
-            if (this->size_impl() < num)
+            if (this->size_impl() < num) {
+                pthread_mutex_unlock(&m_qmtx);
                 return;
+            }
             if (m_type == 0)
             {
                 queue_size = m_queue.size();
@@ -301,7 +303,9 @@ namespace otl
                 queue_size = m_vec.size();
                 if (num > queue_size)
                     num = queue_size;
-                m_vec.erase(m_vec.begin(), m_vec.begin() + num);
+                for (int i = 0; i < num; ++i) {
+                    m_vec.pop_front();
+                }
             }
             pthread_cond_broadcast(&m_push_condv);
             pthread_mutex_unlock(&m_qmtx);
@@ -312,7 +316,7 @@ namespace otl
     private:
         bool m_stop;
         std::string m_name;
-        std::vector<T> m_vec;
+        std::deque<T> m_vec; // use deque for efficient pop_front
         std::queue<T> m_queue;
         pthread_mutex_t m_qmtx;
         pthread_cond_t m_pop_condv;
@@ -321,6 +325,69 @@ namespace otl
         int m_warning;
         std::function<void(T& obj)> m_drop_fn;
     };
+
+    // Lightweight blocking queue for generic use-cases (simple push/pop with optional timeout)
+    // Note: distinct from otl::BlockingQueue above. This variant matches simple semantics used by stream pusher.
+    namespace internal {
+        template<typename T>
+        class BlockingQueue {
+        private:
+            std::queue<T> m_queue;
+            mutable std::mutex m_mutex;
+            std::condition_variable m_condition;
+            bool m_shutdown{false};
+
+        public:
+            void push(T item) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_shutdown) {
+                    m_queue.push(std::move(item));
+                    m_condition.notify_one();
+                }
+            }
+
+            bool pop(T& item, int timeoutMs = -1) {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                if (timeoutMs < 0) {
+                    m_condition.wait(lock, [this] { return !m_queue.empty() || m_shutdown; });
+                } else {
+                    if (!m_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                              [this] { return !m_queue.empty() || m_shutdown; })) {
+                        return false; // timeout
+                    }
+                }
+                if (m_shutdown && m_queue.empty()) return false;
+                if (!m_queue.empty()) {
+                    item = m_queue.front();
+                    m_queue.pop();
+                    return true;
+                }
+                return false;
+            }
+
+            size_t size() const {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                return m_queue.size();
+            }
+
+            bool empty() const {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                return m_queue.empty();
+            }
+
+            void shutdown() {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_shutdown = true;
+                m_condition.notify_all();
+            }
+
+            void reset() {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_shutdown = false;
+                while (!m_queue.empty()) m_queue.pop();
+            }
+        };
+    }
 
     template <typename T>
     class WorkerPool : public NoCopyable

@@ -11,6 +11,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 namespace otl {
     // 编码参数（便捷设置常用项，可通过options扩展）
@@ -46,7 +47,20 @@ namespace otl {
         StreamEncoder();
         virtual ~StreamEncoder();
         virtual int init(EncodeParam *params) = 0;
+        // Legacy encode API (still available for compatibility)
         virtual int encode(AVFrame* frame, AVPacket **p_pkt, int *p_num) = 0;
+
+        // New: vector-based API. Default returns -1 to indicate not implemented by encoder.
+        // Encoder should allocate AVPacket* elements; caller must free each via freePacket().
+        virtual int encode(AVFrame* frame, std::vector<AVPacket*>& outPkts) { (void)frame; (void)outPkts; return -1; }
+
+        // Free a single packet allocated/owned by encoder. Default uses libav to free.
+        virtual void freePacket(AVPacket* pkt) { if (pkt) { av_packet_unref(pkt); av_packet_free(&pkt); } }
+
+        // Provide output stream parameters for muxer setup (used in re-encode path)
+        // Defaults are safe fallbacks; encoders should override.
+        virtual const AVCodecParameters* getCodecParameters() const { return nullptr; }
+        virtual AVRational getTimeBase() const { return {1, 90000}; }
 
         // 请求下一个帧编码为关键帧（IDR）
         virtual int requestKeyFrame() = 0;

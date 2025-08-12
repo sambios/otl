@@ -10,84 +10,11 @@
 #include <string>
 #include "timestamp_smoother.h"
 #include "otl_ffmpeg.h"
+#include "otl_thread_queue.h"
 
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavutil/opt.h>
-}
+
 
 namespace otl {
-namespace internal {
-    template<typename T>
-    class BlockingQueue {
-    private:
-        std::queue<T> m_queue;
-        mutable std::mutex m_mutex;
-        std::condition_variable m_condition;
-        bool m_shutdown{false};
-
-    public:
-        void push(T item) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_shutdown) {
-                m_queue.push(item);
-                m_condition.notify_one();
-            }
-        }
-
-        bool pop(T& item, int timeoutMs = -1) {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            
-            if (timeoutMs < 0) {
-                // Wait indefinitely until item available or shutdown
-                m_condition.wait(lock, [this] { return !m_queue.empty() || m_shutdown; });
-            } else {
-                // Wait with timeout
-                if (!m_condition.wait_for(lock, std::chrono::milliseconds(timeoutMs), 
-                                         [this] { return !m_queue.empty() || m_shutdown; })) {
-                    return false; // Timeout
-                                         }
-            }
-            
-            if (m_shutdown && m_queue.empty()) {
-                return false; // Shutdown and no more items
-            }
-            
-            if (!m_queue.empty()) {
-                item = m_queue.front();
-                m_queue.pop();
-                return true;
-            }
-            
-            return false;
-        }
-
-        size_t size() const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_queue.size();
-        }
-
-        bool empty() const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_queue.empty();
-        }
-
-        void shutdown() {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_shutdown = true;
-            m_condition.notify_all();
-        }
-
-        void reset() {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_shutdown = false;
-            // Clear any remaining items
-            while (!m_queue.empty()) {
-                m_queue.pop();
-            }
-        }
-    };
-}
 
     class FfmpegOutputer : public FfmpegGlobal {
         enum State {
@@ -282,6 +209,86 @@ namespace internal {
                 // << fixed
                 // 如果你需要设置格式相关的选项，可以使用 av_opt_set 等函数
                 // 例如设置严格度（如果需要非严格的时间戳）
+                av_opt_set(m_ofmtCtx, "strict", "experimental", 0);
+            }
+
+            if (!m_ofmtCtx) {
+                printf("Could not create output context\n");
+                return -1;
+            }
+
+            av_dump_format(m_ofmtCtx, 0, m_url.c_str(), 1);
+            ret = outputInitialize();
+            if (ret != 0) {
+                return -1;
+            }
+
+            m_threadOutput = new std::thread(&FfmpegOutputer::outputProcessThreadProc, this);
+            return 0;
+        }
+
+        // New: open using explicit codec parameters and time base (for re-encode path)
+        int openOutputStreamWithCodec(const std::string &url, const AVCodecParameters* codecpar, AVRational time_base) {
+            if (!codecpar) return -1;
+            int ret = 0;
+            const char *formatName = NULL;
+            m_url = url;
+
+            // 重置时间戳平滑器
+            m_timestampSmoother.reset();
+
+            if (stringStartWith(m_url, "rtsp://")) {
+                formatName = "rtsp";
+            } else if (stringStartWith(m_url, "udp://") || stringStartWith(m_url, "tcp://")) {
+                if (codecpar->codec_id == AV_CODEC_ID_H264)
+                    formatName = "h264";
+                else if (codecpar->codec_id == AV_CODEC_ID_HEVC)
+                    formatName = "hevc";
+                else
+                    formatName = "rawvideo";
+            } else if (stringStartWith(m_url, "rtp://")) {
+                formatName = "rtp";
+            } else if (stringStartWith(m_url, "rtmp://")) {
+                formatName = "flv";
+            } else {
+                std::cout << "Not support this Url:" << m_url << std::endl;
+                return -1;
+            }
+
+            std::cout << "open url=" << m_url << ",format_name=" << formatName << std::endl;
+
+            if (nullptr == m_ofmtCtx) {
+                ret = avformat_alloc_output_context2(&m_ofmtCtx, NULL, formatName, m_url.c_str());
+                if (ret < 0 || m_ofmtCtx == NULL) {
+                    std::cout << "avformat_alloc_output_context2() err=" << ret << std::endl;
+                    return -1;
+                }
+
+                AVStream *ostream = avformat_new_stream(m_ofmtCtx, NULL);
+                if (NULL == ostream) {
+                    std::cout << "Can't create new stream!" << std::endl;
+                    return -1;
+                }
+
+#if LIBAVCODEC_VERSION_MAJOR > 56
+                ret = avcodec_parameters_copy(ostream->codecpar, codecpar);
+                if (ret < 0) {
+                    std::cout << "avcodec_parameters_copy() err=" << ret << std::endl;
+                    return -1;
+                }
+#else
+                // legacy path if needed
+                ret = avcodec_copy_context(ostream->codec, codec);
+                if (ret < 0){
+                    printf("avcodec_copy_context() err=%d", ret);
+                    return -1;
+                }
+#endif
+
+                // set time base for the output stream
+                ostream->time_base = time_base;
+
+                // 允许非严格时间戳
                 av_opt_set(m_ofmtCtx, "strict", "experimental", 0);
             }
 

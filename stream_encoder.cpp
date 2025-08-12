@@ -129,6 +129,63 @@ public:
         }
     }
 
+    // New vector-based API: collects all available packets after sending a frame
+    int encode(AVFrame* frame, std::vector<AVPacket*>& outPkts) override {
+        if (!mCtx) return AVERROR(EINVAL);
+
+        // apply on-demand keyframe request
+        if (frame && mForceIdr.exchange(false)) {
+            frame->pict_type = AV_PICTURE_TYPE_I;
+            frame->key_frame = 1;
+        }
+
+        int ret = avcodec_send_frame(mCtx, frame);
+        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+            logAvError("avcodec_send_frame", ret);
+            return ret;
+        }
+
+        while (true) {
+            AVPacket* pkt = av_packet_alloc();
+            if (!pkt) return AVERROR(ENOMEM);
+            ret = avcodec_receive_packet(mCtx, pkt);
+            if (ret == 0) {
+                outPkts.push_back(pkt);
+                mFrameCount.fetch_add(1, std::memory_order_relaxed);
+                continue; // try drain more
+            }
+            av_packet_free(&pkt);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return 0; // done
+            logAvError("avcodec_receive_packet", ret);
+            return ret;
+        }
+    }
+
+    void freePacket(AVPacket* pkt) override {
+        if (pkt) {
+            av_packet_unref(pkt);
+            av_packet_free(&pkt);
+        }
+    }
+
+    const AVCodecParameters* getCodecParameters() const override {
+        if (!mCtx) return nullptr;
+        if (!mCodecPar) {
+            mCodecPar = avcodec_parameters_alloc();
+            if (!mCodecPar) return nullptr;
+        }
+        // Refresh from current context each call to reflect runtime changes (e.g., extradata)
+        if (avcodec_parameters_from_context(mCodecPar, mCtx) < 0) {
+            return nullptr;
+        }
+        return mCodecPar;
+    }
+
+    AVRational getTimeBase() const override {
+        if (mCtx) return mCtx->time_base;
+        return {1, 90000};
+    }
+
     int requestKeyFrame() override {
         mForceIdr.store(true, std::memory_order_relaxed);
         return 0;
@@ -230,6 +287,10 @@ private:
             avcodec_free_context(&mCtx);
             mCtx = nullptr;
         }
+        if (mCodecPar) {
+            avcodec_parameters_free(&mCodecPar);
+            mCodecPar = nullptr;
+        }
     }
 
     static void logAvError(const char* what, int err) {
@@ -242,6 +303,7 @@ private:
     std::string mCodecName;
     EncodeParam mParams{};
     AVCodecContext* mCtx{nullptr};
+    mutable AVCodecParameters* mCodecPar{nullptr};
 
     std::atomic<bool> mForceIdr{false};
     std::atomic<uint64_t> mFrameCount{0};

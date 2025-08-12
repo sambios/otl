@@ -5,6 +5,8 @@
 #ifndef OTL_FFMPEG_H
 #define OTL_FFMPEG_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #include "libavdevice/avdevice.h"

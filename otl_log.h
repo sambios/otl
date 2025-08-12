@@ -63,10 +63,15 @@ struct LogConfig {
 };
 
 // 初始化/销毁/动态配置接口
+void init(int argc, char* argv[]);
 void init(const LogConfig& config);
+
 void deinit();
 void updateConfig(const LogConfig& config);
 LogConfig getConfig();
+// 简化接口：单独设置/获取日志级别
+void setLevel(LogLevel level);
+LogLevel getLevel();
 
 // C++流式日志接口宏
 #define OTL_LOG(level, moduleTag) \
@@ -74,6 +79,26 @@ LogConfig getConfig();
 
 // printf style log interface
 void LogPrintf(const std::string& moduleTag, LogLevel level, const char* fmt, ...);
+
+// Convenience printf-style macros (compatible with usage in stream_encoder.cpp)
+#ifndef OTL_LOGE
+#define OTL_LOGE(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_ERROR,   (fmt), ##__VA_ARGS__)
+#endif
+#ifndef OTL_LOGW
+#define OTL_LOGW(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_WARNING, (fmt), ##__VA_ARGS__)
+#endif
+#ifndef OTL_LOGI
+#define OTL_LOGI(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_INFO,    (fmt), ##__VA_ARGS__)
+#endif
+#ifndef OTL_LOGD
+#define OTL_LOGD(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_DEBUG,   (fmt), ##__VA_ARGS__)
+#endif
+#ifndef OTL_LOGT
+#define OTL_LOGT(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_TRACE,   (fmt), ##__VA_ARGS__)
+#endif
+#ifndef OTL_LOGF
+#define OTL_LOGF(tag, fmt, ...) ::otl::log::LogPrintf((tag), ::otl::log::LOG_FATAL,   (fmt), ##__VA_ARGS__)
+#endif
 
 // 日志流对象声明
 class LogStream : public std::ostringstream {

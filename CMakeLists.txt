@@ -46,6 +46,7 @@ add_library(otl stream_sei.cpp
         otl_timer.cpp
         otl_string.cpp
         optimized_timer.cpp
+        stream_encoder.cpp
         otl_log.cpp
         ${DECODE_SRC}
         )
@@ -71,3 +72,7 @@ target_link_libraries(log_telnet_test otl
         ${FFMPEG_LINK_LIBS}
         pthread)
 
+add_executable(test_thread_queue test_thread_queue.cpp)
+target_link_libraries(test_thread_queue otl
+        ${FFMPEG_LINK_LIBS}
+        pthread)

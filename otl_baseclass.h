@@ -22,6 +22,7 @@
 #include <string>
 #include <type_traits>
 #include <cstdint>
+#include <sstream>
 
 namespace otl
 {
@@ -309,6 +310,17 @@ namespace otl
         size_t size()
         {
             return m_bboxes.size();
+        }
+
+        std::string toString()
+        {
+            std::stringstream ss;
+            for (int i = 0; i < m_bboxes.size(); ++i)
+            {
+                ss << i << ":" <<  m_bboxes[i].classId << "," << m_bboxes[i].confidence << " (" << m_bboxes[i].x1 << "," << m_bboxes[i].y1 << ","
+                << m_bboxes[i].x2 << "," << m_bboxes[i].y2  << ")" << std::endl;
+            }
+            return ss.str();
         }
 
     };

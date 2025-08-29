@@ -127,7 +127,7 @@ int StreamDemuxer::doService() {
             if (ptsTime > nowTime) {
                 int64_t delta = ptsTime - nowTime;
                 if (delta < 100000) {
-                    av_usleep(delta);
+                    //av_usleep(delta);
                 }
             }
         }

@@ -31,7 +31,8 @@ struct StreamDecoderEvents {
     virtual void onStreamEof() {};
 };
 
-class StreamDecoder : public StreamDemuxerEvents {
+class StreamDecoder : public StreamDemuxerEvents
+{
     StreamDecoderEvents *mObserver;
 
     using OnDecodedFrameCallback = std::function<void(const AVPacket *pkt, const AVFrame *pFrame)>;
@@ -85,7 +86,7 @@ protected:
     virtual void onReadEof(AVPacket *pkt) override;
 
 public:
-    StreamDecoder(int id, AVCodecContext *decoder = nullptr);
+    explicit StreamDecoder(int id, AVCodecContext *decoder = nullptr);
     virtual ~StreamDecoder();
 
     int setObserver(StreamDecoderEvents *observer);

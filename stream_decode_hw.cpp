@@ -150,13 +150,19 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame)
         }
     }
 
-    // 循环从解码器接收帧（一个数据包可能解码出多帧）
+    // Allocate a temporary frame for receiving frames
+    AVFrame *tempFrame = av_frame_alloc();
+    if (!tempFrame) {
+        return AVERROR(ENOMEM);
+    }
+
+    // Loop to receive frames (one packet may decode multiple frames)
     while (true)
     {
-        ret = avcodec_receive_frame(decCtx, pFrame);
+        ret = avcodec_receive_frame(decCtx, tempFrame);
         if (ret == AVERROR(EAGAIN))
         {
-            // 需要更多数据包
+            // Need more packets
             break;
         }
         else if (ret == AVERROR_EOF)
@@ -167,18 +173,21 @@ int StreamDecoder::decodeFrame(AVPacket *pkt, AVFrame *pFrame)
         else if (ret < 0)
         {
             print_ffmpeg_error(ret);
-            return ret; // 返回错误码
+            av_frame_free(&tempFrame);
+            return ret; // Return error code
         }
 
         gotPicture++;
 
-        // 如果是硬件帧，需要将其从硬件设备内存转移到系统内存
-        // 不再在 decode 阶段将硬件帧下载为系统内存帧，保留 HW 帧以尽量保持硬件加速。
-
-        // 如果调用者期望只处理一帧，此处应该可以返回
-        // 但为了支持一次解码多帧，我们继续处理直到需要更多数据
-        break;
+        // Move the frame reference to pFrame
+        // Unref pFrame first if it already contains a frame
+        if (pFrame->buf[0]) {
+            av_frame_unref(pFrame);
+        }
+        av_frame_move_ref(pFrame, tempFrame);
     }
+
+    av_frame_free(&tempFrame);
 
     return gotPicture;
 

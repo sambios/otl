@@ -31,7 +31,7 @@ public:
 #endif
         avformat_network_init();
         avdevice_register_all();
-        av_log_set_level(AV_LOG_VERBOSE);
+        av_log_set_level(AV_LOG_INFO);
     }
 
     virtual ~FfmpegGlobal() {

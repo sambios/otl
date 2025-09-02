@@ -5,6 +5,7 @@
 
 #include <memory>
 #include "otl_thread_queue.h"
+#include "otl_timer.h"
 
 namespace otl {
     // declare before
@@ -58,6 +59,22 @@ namespace otl {
 
     };
 
+    struct PipeStatus
+    {
+        int preprocess_queue_size;
+        int preprocess_queue_current;
+        float preprocess_fps;
+
+        int forward_queue_size;
+        int forward_queue_current;
+        float forward_fps;
+
+        int postprocess_queue_size;
+        int postprocess_queue_current;
+        float postprocess_fps;
+
+    };
+
     template<typename T1>
     class InferencePipe {
         DetectorParam m_param;
@@ -70,10 +87,15 @@ namespace otl {
         WorkerPool<T1> m_preprocessWorkerPool;
         WorkerPool<T1> m_forwardWorkerPool;
         WorkerPool<T1> m_postprocessWorkerPool;
+        StatToolPtr m_preprocessStatis;
+        StatToolPtr m_forwardStatis;
+        StatToolPtr m_postprocessStatis;
 
     public:
         InferencePipe() {
-
+            m_preprocessStatis = otl::StatTool::create();
+            m_forwardStatis = otl::StatTool::create();
+            m_postprocessStatis = otl::StatTool::create();
         }
 
         virtual ~InferencePipe() {
@@ -98,12 +120,14 @@ namespace otl {
             m_preprocessWorkerPool.init(m_preprocessQue.get(), param.preprocess_thread_num, param.batch_num, param.batch_num);
             m_preprocessWorkerPool.startWork([this, &param](std::vector<T1> &items) {
                 m_detect_delegate->preprocess(items);
+                this->m_preprocessStatis->update();
                 this->m_forwardQue->push(items);
             });
 
             m_forwardWorkerPool.init(m_forwardQue.get(), param.inference_thread_num, 1, 8);
             m_forwardWorkerPool.startWork([this, &param](std::vector<T1> &items) {
                 m_detect_delegate->forward(items);
+                this->m_forwardStatis->update();
                 this->m_postprocessQue->push(items);
             },
             [this]() // Initialize Function
@@ -114,6 +138,7 @@ namespace otl {
             m_postprocessWorkerPool.init(m_postprocessQue.get(), param.postprocess_thread_num, 1, 8);
             m_postprocessWorkerPool.startWork([this, &param](std::vector<T1> &items) {
                 m_detect_delegate->postprocess(items);
+                m_postprocessStatis->update();
             });
             return 0;
         }
@@ -126,6 +151,26 @@ namespace otl {
         int push_frame(T1 *frame) {
             m_preprocessQue->push(*frame);
             return 0;
+        }
+
+        int statis(PipeStatus *p_status)
+        {
+            PipeStatus status;
+            status.preprocess_queue_size = m_param.preprocess_queue_size;
+            status.preprocess_queue_current = m_preprocessQue->size();
+            status.preprocess_fps = m_preprocessStatis->getSpeed();
+
+            status.forward_queue_size = m_param.inference_queue_size;
+            status.forward_queue_current = m_forwardQue->size();
+            status.forward_fps = m_forwardStatis->getSpeed();
+
+            status.postprocess_queue_size = m_param.postprocess_queue_size;
+            status.postprocess_queue_current = m_postprocessQue->size();
+            status.postprocess_fps = m_postprocessStatis->getSpeed();
+
+            if (p_status) *p_status = status;
+            return 0;
+
         }
 
 

@@ -13,6 +13,17 @@ extern "C" {
 
 namespace otl
 {
+    // 获取AVDictionary中指定key的value
+    static const char* get_dict_value(AVDictionary* dict, const char* key) {
+        // 第三个参数为上次找到的条目，传NULL表示从头开始查找
+        // 第四个参数为查找标志，0表示精确匹配
+        AVDictionaryEntry* entry = av_dict_get(dict, key, NULL, 0);
+        if (entry) {
+            return entry->value;  // 返回找到的value字符串
+        } else {
+            return NULL;  // 未找到对应key
+        }
+    }
 
 void print_ffmpeg_error(int err_code)
 {
@@ -638,6 +649,12 @@ int StreamDecoder::createVideoDecoder(AVFormatContext *ifmtCtx)
         mDecCtx->opaque = this;
         mDecCtx->get_format = get_hw_format;
         // 不设置 mDecCtx->pix_fmt 为 SW 格式，交由解码器选择 HW 表面格式
+    }
+
+    auto pix_fmt = get_dict_value(mOptsDecoder, "pix_fmt");
+    if (pix_fmt != nullptr && strcmp(pix_fmt, "bgr24") == 0)
+    {
+        mDecCtx->pix_fmt = AV_PIX_FMT_BGR24;
     }
 
     if ((ret = avcodec_open2(mDecCtx, codec, &mOptsDecoder)) < 0)
